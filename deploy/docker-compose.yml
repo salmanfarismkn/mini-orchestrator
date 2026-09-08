@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: mini-orchestrator-postgres
+    environment:
+      POSTGRES_DB: orchestrator
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+    ports:
+      - "5432:5432"
+    volumes:
+      - orchestrator-postgres-data:/var/lib/postgresql
+
+volumes:
+  orchestrator-postgres-data:
