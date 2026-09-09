@@ -31,8 +31,8 @@ type heartbeatRequest struct {
 }
 
 type heartbeatResponse struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
+	ID        string    `json:"id"`
+	Status    string    `json:"status"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
@@ -81,7 +81,6 @@ type registerNodeResponse struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
 }
-
 
 func (s *Server) registerNode(
 	w http.ResponseWriter,

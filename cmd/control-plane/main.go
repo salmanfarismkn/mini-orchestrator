@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"mini-orchestrator/internal/api"
-	"mini-orchestrator/internal/store"
 	"mini-orchestrator/internal/node"
+	"mini-orchestrator/internal/store"
 )
 
 func main() {

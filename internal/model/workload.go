@@ -15,8 +15,8 @@ const (
 type Workload struct {
 	ID               string
 	ServiceID        string
-	NodeID           string
-	ContainerID      string
+	NodeID           *string
+	ContainerID      *string
 	Image            string
 	CPURequestMillis int
 	MemoryRequestMB  int

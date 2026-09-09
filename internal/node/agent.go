@@ -30,8 +30,6 @@ type registrationRequest struct {
 	MemoryCapacity int    `json:"memory_capacity_mb"`
 }
 
-
-
 func (a *Agent) Register(ctx context.Context) error {
 	payload := registrationRequest{
 		ID:             a.ID,
@@ -130,7 +128,6 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 
 	return nil
 }
-
 
 func (a *Agent) RunHeartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)

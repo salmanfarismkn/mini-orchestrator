@@ -1,16 +1,15 @@
 package runtime
 
 import (
-    "context"
-    "fmt"
-    "io"
+	"context"
+	"fmt"
+	"io"
 
-    "github.com/docker/docker/api/types"
-    "github.com/docker/docker/api/types/container"
-    "github.com/docker/docker/client"
-    "github.com/docker/docker/errdefs"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 )
-
 
 type DockerRuntime struct {
 	client *client.Client
