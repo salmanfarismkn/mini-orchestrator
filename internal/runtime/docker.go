@@ -3,6 +3,7 @@ package runtime
 import (
     "context"
     "fmt"
+    "io"
 
     "github.com/docker/docker/api/types"
     "github.com/docker/docker/api/types/container"
@@ -35,7 +36,7 @@ func (d *DockerRuntime) Create(
 	_, _, err := d.client.ImageInspectWithRaw(ctx, config.Image)
 
 	if err != nil {
-		_, err = d.client.ImagePull(
+		reader, err := d.client.ImagePull(
 			ctx,
 			config.Image,
 			types.ImagePullOptions{},
@@ -45,6 +46,15 @@ func (d *DockerRuntime) Create(
 				"pull image %q: %w",
 				config.Image,
 				err,
+			)
+		}
+		defer reader.Close()
+
+		if _, copyErr := io.Copy(io.Discard, reader); copyErr != nil {
+			return Container{}, fmt.Errorf(
+				"pull image %q: %w",
+				config.Image,
+				copyErr,
 			)
 		}
 	}
