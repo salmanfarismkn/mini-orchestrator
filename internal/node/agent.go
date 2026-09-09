@@ -1,24 +1,26 @@
 package node
 
-import "log"
-
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
+
+	"mini-orchestrator/internal/runtime"
 )
 
 type Agent struct {
-	ID             string
-	Address        string
-	CPUCapacity    int
-	MemoryCapacity int
-
+	ID              string
+	Address         string
+	CPUCapacity     int
+	MemoryCapacity  int
 	ControlPlaneURL string
-	Client           *http.Client
+
+	Client  *http.Client
+	Runtime runtime.Runtime
 }
 
 type registrationRequest struct {

@@ -8,6 +8,7 @@ import (
     "github.com/docker/docker/api/types"
     "github.com/docker/docker/api/types/container"
     "github.com/docker/docker/client"
+    "github.com/docker/docker/errdefs"
 )
 
 
@@ -94,11 +95,23 @@ func (d *DockerRuntime) Start(
 	ctx context.Context,
 	containerID string,
 ) error {
+	info, err := d.client.ContainerInspect(ctx, containerID)
+	if err == nil && info.State != nil && info.State.Status == "running" {
+		return nil
+	}
+
 	if err := d.client.ContainerStart(
 		ctx,
 		containerID,
 		container.StartOptions{},
 	); err != nil {
+		if errdefs.IsConflict(err) || errdefs.IsNotModified(err) {
+			info, inspectErr := d.client.ContainerInspect(ctx, containerID)
+			if inspectErr == nil && info.State != nil && info.State.Status == "running" {
+				return nil
+			}
+		}
+
 		return fmt.Errorf(
 			"start container %q: %w",
 			containerID,

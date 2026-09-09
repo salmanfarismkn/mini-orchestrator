@@ -31,6 +31,10 @@ func TestDockerRuntime(t *testing.T) {
 		t.Fatalf("start container: %v", err)
 	}
 
+	if err := runtime.Start(ctx, container.ID); err != nil {
+		t.Fatalf("start already-running container: %v", err)
+	}
+
 	info, err := runtime.Inspect(ctx, container.ID)
 	if err != nil {
 		t.Fatalf("inspect container: %v", err)
