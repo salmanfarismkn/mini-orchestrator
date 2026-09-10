@@ -20,40 +20,74 @@ func NewReplicaController(store *store.Postgres) *ReplicaController {
 	}
 }
 
-// ReconcileService makes the number of active workloads
-// match the service's desired replica count.
+
 func (c *ReplicaController) ReconcileService(
 	ctx context.Context,
 	service model.Service,
 ) error {
 	workloads, err := c.store.ListWorkloadsByService(ctx, service.ID)
 	if err != nil {
-		return fmt.Errorf("list workloads for service %q: %w", service.ID, err)
+		return fmt.Errorf(
+			"list workloads for service %q: %w",
+			service.ID,
+			err,
+		)
 	}
 
 	activeReplicas := countActiveReplicas(workloads)
 
-	if activeReplicas >= service.DesiredReplicas {
+	// Scale up.
+	if activeReplicas < service.DesiredReplicas {
+		missing := service.DesiredReplicas - activeReplicas
+
+		for i := 0; i < missing; i++ {
+			workload := model.Workload{
+				ID:               newWorkloadID(),
+				ServiceID:        service.ID,
+				Image:            service.Image,
+				CPURequestMillis: service.CPURequestMillis,
+				MemoryRequestMB: service.MemoryRequestMB,
+				DeploymentVersion: service.DeploymentVersion,
+				DesiredState:     model.WorkloadPending,
+				ActualState:      model.WorkloadPending,
+			}
+
+			if err := c.store.CreatePendingWorkload(
+				ctx,
+				workload,
+			); err != nil {
+				return fmt.Errorf(
+					"create pending workload: %w",
+					err,
+				)
+			}
+		}
+
 		return nil
 	}
 
-	missing := service.DesiredReplicas - activeReplicas
+	// Desired count already satisfied.
+	if activeReplicas == service.DesiredReplicas {
+		return nil
+	}
 
-	for i := 0; i < missing; i++ {
-		workload := model.Workload{
-			ID:                 newWorkloadID(),
-			ServiceID:          service.ID,
-			Image:              service.Image,
-			CPURequestMillis:   service.CPURequestMillis,
-			MemoryRequestMB:    service.MemoryRequestMB,
-			DesiredState:       model.WorkloadPending,
-			ActualState:        model.WorkloadPending,
-		}
+	// Scale down.
+	excess := activeReplicas - service.DesiredReplicas
 
-		if err := c.store.CreatePendingWorkload(ctx, workload); err != nil {
+	candidates := selectScaleDownCandidates(
+		workloads,
+		excess,
+	)
+
+	for _, workload := range candidates {
+		if err := c.store.UpdateWorkloadDesiredState(
+			ctx,
+			workload.ID,
+			model.WorkloadStopped,
+		); err != nil {
 			return fmt.Errorf(
-				"create pending workload for service %q: %w",
-				service.ID,
+				"mark workload %q for shutdown: %w",
+				workload.ID,
 				err,
 			)
 		}
@@ -85,4 +119,28 @@ func newWorkloadID() string {
 	}
 
 	return "wl-" + hex.EncodeToString(b[:])
+}
+
+func selectScaleDownCandidates(
+	workloads []model.Workload,
+	count int,
+) []model.Workload {
+	var candidates []model.Workload
+
+	// Work backwards so newer workloads are removed first.
+	for i := len(workloads) - 1; i >= 0 && len(candidates) < count; i-- {
+		workload := workloads[i]
+
+		switch workload.ActualState {
+		case model.WorkloadPending,
+			model.WorkloadScheduled,
+			model.WorkloadRunning:
+
+			if workload.DesiredState != model.WorkloadStopped {
+				candidates = append(candidates, workload)
+			}
+		}
+	}
+
+	return candidates
 }

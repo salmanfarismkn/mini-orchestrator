@@ -56,9 +56,10 @@ func main() {
 		nodeClient,
 	)
 	replicaController := controller.NewReplicaController(db)
-
+	deploymentController := controller.NewDeploymentController(db)
 	reconciler := reconciler.New(
 		db,
+		deploymentController,
 		replicaController,
 		schedulerService,
 		executor,

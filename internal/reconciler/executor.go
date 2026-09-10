@@ -86,3 +86,66 @@ func (e *WorkloadExecutor) Execute(
 
 	return nil
 }
+
+func (e *WorkloadExecutor) Stop(
+	ctx context.Context,
+	workload model.Workload,
+	node model.Node,
+) error {
+	if workload.DesiredState != model.WorkloadStopped {
+		return nil
+	}
+
+	// Pending workloads don't have a container.
+	if workload.ContainerID == nil {
+		return e.store.MarkWorkloadStoppedAndReleaseResources(
+			ctx,
+			workload.ID,
+		)
+	}
+
+	containerID := *workload.ContainerID
+
+	if err := e.nodeClient.StopContainer(
+		ctx,
+		node.Address,
+		containerID,
+	); err != nil {
+		return fmt.Errorf(
+			"stop container %q: %w",
+			containerID,
+			err,
+		)
+	}
+
+	if err := e.nodeClient.DeleteContainer(
+		ctx,
+		node.Address,
+		containerID,
+	); err != nil {
+		return fmt.Errorf(
+			"delete container %q: %w",
+			containerID,
+			err,
+		)
+	}
+
+	if err := e.store.MarkWorkloadStoppedAndReleaseResources(
+		ctx,
+		workload.ID,
+	); err != nil {
+		return fmt.Errorf(
+			"persist stopped workload: %w",
+			err,
+		)
+	}
+
+	slog.Info(
+		"workload stopped",
+		"workload_id", workload.ID,
+		"container_id", containerID,
+		"node_id", node.ID,
+	)
+
+	return nil
+}

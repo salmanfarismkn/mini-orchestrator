@@ -8,44 +8,51 @@ import (
 )
 
 func (p *Postgres) CreateWorkload(
-	ctx context.Context,
-	workload model.Workload,
+    ctx context.Context,
+    workload model.Workload,
 ) error {
-	const query = `
-		INSERT INTO workloads (
-			id,
-			service_id,
-			node_id,
-			container_id,
-			image,
-			cpu_request_millis,
-			memory_request_mb,
-			desired_state,
-			actual_state
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`
+    const query = `
+        INSERT INTO workloads (
+            id,
+            service_id,
+            node_id,
+            container_id,
+            image,
+            cpu_request_millis,
+            memory_request_mb,
+            deployment_version,
+            desired_state,
+            actual_state,
+            created_at,
+            updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    `
 
-	_, err := p.db.ExecContext(
-		ctx,
-		query,
-		workload.ID,
-		workload.ServiceID,
-		workload.NodeID,
-		workload.ContainerID,
-		workload.Image,
-		workload.CPURequestMillis,
-		workload.MemoryRequestMB,
-		workload.DesiredState,
-		workload.ActualState,
-	)
+    _, err := p.db.ExecContext(
+        ctx,
+        query,
+        workload.ID,
+        workload.ServiceID,
+        workload.NodeID,
+        workload.ContainerID,
+        workload.Image,
+        workload.CPURequestMillis,
+        workload.MemoryRequestMB,
+        workload.DeploymentVersion,
+        workload.DesiredState,
+        workload.ActualState,
+        workload.CreatedAt,
+        workload.UpdatedAt,
+    )
 
-	if err != nil {
-		return fmt.Errorf("create workload %q: %w", workload.ID, err)
-	}
+    if err != nil {
+        return fmt.Errorf("create workload %q: %w", workload.ID, err)
+    }
 
-	return nil
+    return nil
 }
+
 
 func (p *Postgres) GetWorkload(
 	ctx context.Context,
@@ -60,6 +67,7 @@ func (p *Postgres) GetWorkload(
 			image,
 			cpu_request_millis,
 			memory_request_mb,
+			deployment_version,
 			desired_state,
 			actual_state,
 			created_at,
@@ -108,6 +116,7 @@ func (p *Postgres) ListWorkloadsByService(
 			image,
 			cpu_request_millis,
 			memory_request_mb,
+			deployment_version,
 			desired_state,
 			actual_state,
 			created_at,
@@ -140,6 +149,7 @@ func (p *Postgres) ListWorkloadsByService(
 			&workload.Image,
 			&workload.CPURequestMillis,
 			&workload.MemoryRequestMB,
+			&workload.DeploymentVersion,
 			&workload.DesiredState,
 			&workload.ActualState,
 			&workload.CreatedAt,
@@ -367,6 +377,7 @@ func (p *Postgres) GetWorkloadByContainerID(
 			image,
 			cpu_request_millis,
 			memory_request_mb,
+			deployment_version,
 			desired_state,
 			actual_state,
 			created_at,
@@ -381,6 +392,7 @@ func (p *Postgres) GetWorkloadByContainerID(
 		&workload.Image,
 		&workload.CPURequestMillis,
 		&workload.MemoryRequestMB,
+		&workload.DeploymentVersion,
 		&workload.DesiredState,
 		&workload.ActualState,
 		&workload.CreatedAt,
@@ -618,3 +630,126 @@ func (p *Postgres) RecoverWorkloadsFromNode(
 
 	return nil
 }
+
+func (p *Postgres) UpdateWorkloadDesiredState(
+	ctx context.Context,
+	workloadID string,
+	state model.WorkloadState,
+) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE workloads
+		SET
+			desired_state = $1,
+			updated_at = NOW()
+		WHERE id = $2
+	`,
+		state,
+		workloadID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("update workload desired state: %w", err)
+	}
+
+	return nil
+}
+
+func (p *Postgres) MarkWorkloadStoppedAndReleaseResources(
+	ctx context.Context,
+	workloadID string,
+) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin stop transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var (
+		nodeID        *string
+		cpuRequest    int
+		memoryRequest int
+		actualState   model.WorkloadState
+	)
+
+	err = tx.QueryRowContext(ctx, `
+		SELECT
+			node_id,
+			cpu_request_millis,
+			memory_request_mb,
+			actual_state
+		FROM workloads
+		WHERE id = $1
+		FOR UPDATE
+	`, workloadID).Scan(
+		&nodeID,
+		&cpuRequest,
+		&memoryRequest,
+		&actualState,
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"get workload for stop: %w",
+			err,
+		)
+	}
+
+	// Already stopped, so resources should already be released.
+	if actualState == model.WorkloadStopped {
+		return nil
+	}
+
+	if nodeID != nil {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE nodes
+			SET
+				cpu_allocated_millis =
+					cpu_allocated_millis - $1,
+				memory_allocated_mb =
+					memory_allocated_mb - $2,
+				updated_at = NOW()
+			WHERE id = $3
+			  AND cpu_allocated_millis >= $1
+			  AND memory_allocated_mb >= $2
+		`,
+			cpuRequest,
+			memoryRequest,
+			*nodeID,
+		)
+
+		if err != nil {
+			return fmt.Errorf(
+				"release workload resources: %w",
+				err,
+			)
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workloads
+		SET
+			actual_state = $1,
+			updated_at = NOW()
+		WHERE id = $2
+	`,
+		model.WorkloadStopped,
+		workloadID,
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"mark workload stopped: %w",
+			err,
+		)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf(
+			"commit workload stop: %w",
+			err,
+		)
+	}
+
+	return nil
+}
+

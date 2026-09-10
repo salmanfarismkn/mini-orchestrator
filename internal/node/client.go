@@ -164,3 +164,65 @@ func (c *Client) ListContainers(
 
 	return containers, nil
 }
+
+func (c *Client) StopContainer(
+	ctx context.Context,
+	nodeAddress string,
+	containerID string,
+) error {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"http://"+nodeAddress+"/containers/"+containerID+"/stop",
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("create stop request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send stop request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf(
+			"node returned status %d while stopping container",
+			resp.StatusCode,
+		)
+	}
+
+	return nil
+}
+
+func (c *Client) DeleteContainer(
+	ctx context.Context,
+	nodeAddress string,
+	containerID string,
+) error {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodDelete,
+		"http://"+nodeAddress+"/containers/"+containerID,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("create delete request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send delete request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf(
+			"node returned status %d while deleting container",
+			resp.StatusCode,
+		)
+	}
+
+	return nil
+}

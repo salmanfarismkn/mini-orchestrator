@@ -13,15 +13,16 @@ const (
 )
 
 type Workload struct {
-	ID               string
-	ServiceID        string
-	NodeID           *string
-	ContainerID      *string
-	Image            string
-	CPURequestMillis int
-	MemoryRequestMB  int
-	DesiredState     WorkloadState
-	ActualState      WorkloadState
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                 string
+	ServiceID          string
+	NodeID             *string
+	ContainerID        *string
+	Image              string
+	CPURequestMillis   int
+	MemoryRequestMB    int
+	DeploymentVersion  int
+	DesiredState       WorkloadState
+	ActualState        WorkloadState
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }

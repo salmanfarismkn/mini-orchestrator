@@ -12,16 +12,18 @@ import (
 )
 
 type Reconciler struct {
-	store             *store.Postgres
-	replicaController *controller.ReplicaController
-	schedulerService  *scheduler.Service
-	executor          *WorkloadExecutor
-	runtimeReconciler *RuntimeReconciler
-	interval          time.Duration
+	store              *store.Postgres
+	deploymentController *controller.DeploymentController
+	replicaController  *controller.ReplicaController
+	schedulerService   *scheduler.Service
+	executor           *WorkloadExecutor
+	runtimeReconciler  *RuntimeReconciler
+	interval           time.Duration
 }
 
 func New(
 	store *store.Postgres,
+	deploymentController *controller.DeploymentController,
 	replicaController *controller.ReplicaController,
 	schedulerService *scheduler.Service,
 	executor *WorkloadExecutor,
@@ -29,12 +31,13 @@ func New(
 	interval time.Duration,
 ) *Reconciler {
 	return &Reconciler{
-		store:             store,
-		replicaController: replicaController,
-		schedulerService:  schedulerService,
-		executor:          executor,
-		runtimeReconciler: runtimeReconciler,
-		interval:          interval,
+		store:               store,
+		deploymentController: deploymentController,
+		replicaController:  replicaController,
+		schedulerService:    schedulerService,
+		executor:            executor,
+		runtimeReconciler:   runtimeReconciler,
+		interval:           interval,
 	}
 }
 
@@ -116,6 +119,42 @@ func (r *Reconciler) reconcile(ctx context.Context) {
             )
         }
     }
+	for _, service := range services {
+		if err := r.deploymentController.ReconcileService(
+			ctx,
+			service,
+		); err != nil {
+			slog.Error(
+				"deployment reconciliation failed",
+				"service_id", service.ID,
+				"error", err,
+			)
+			continue
+		}
+
+		if err := r.replicaController.ReconcileService(
+			ctx,
+			service,
+		); err != nil {
+			slog.Error(
+				"replica reconciliation failed",
+				"service_id", service.ID,
+				"error", err,
+			)
+			continue
+		}
+
+		if err := r.schedulePendingWorkloads(
+			ctx,
+			service,
+		); err != nil {
+			slog.Error(
+				"workload scheduling failed",
+				"service_id", service.ID,
+				"error", err,
+			)
+		}
+	}
 }
 
 
@@ -155,15 +194,28 @@ func (r *Reconciler) executeScheduledWorkloads(
 	}
 
 	for _, workload := range workloads {
-		if workload.ActualState != model.WorkloadScheduled {
+		switch {
+		case workload.DesiredState == model.WorkloadStopped:
+			if workload.NodeID == nil {
+				if err := r.executor.Stop(
+					ctx,
+					workload,
+					model.Node{},
+				); err != nil {
+					slog.Error(
+						"failed to stop pending workload",
+						"workload_id", workload.ID,
+						"error", err,
+					)
+				}
+				continue
+			}
+
+		case workload.ActualState != model.WorkloadScheduled:
 			continue
 		}
 
 		if workload.NodeID == nil {
-			slog.Error(
-				"scheduled workload has no node",
-				"workload_id", workload.ID,
-			)
 			continue
 		}
 
@@ -178,7 +230,28 @@ func (r *Reconciler) executeScheduledWorkloads(
 			continue
 		}
 
-		if err := r.executor.Execute(ctx, workload, node); err != nil {
+		if workload.DesiredState == model.WorkloadStopped {
+			if err := r.executor.Stop(
+				ctx,
+				workload,
+				node,
+			); err != nil {
+				slog.Error(
+					"failed to stop workload",
+					"workload_id", workload.ID,
+					"node_id", node.ID,
+					"error", err,
+				)
+			}
+
+			continue
+		}
+
+		if err := r.executor.Execute(
+			ctx,
+			workload,
+			node,
+		); err != nil {
 			slog.Error(
 				"workload execution failed",
 				"workload_id", workload.ID,
