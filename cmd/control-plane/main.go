@@ -46,17 +46,28 @@ func main() {
 		db,
 		schedulerEngine,
 	)
-
+	nodeClient := node.NewClient(nil)
+	runtimeReconciler := reconciler.NewRuntimeReconciler(
+		db,
+		nodeClient,
+	)
+	executor := reconciler.NewWorkloadExecutor(
+		db,
+		nodeClient,
+	)
 	replicaController := controller.NewReplicaController(db)
 
 	reconciler := reconciler.New(
 		db,
 		replicaController,
 		schedulerService,
+		executor,
+		runtimeReconciler,
 		5*time.Second,
 	)
 
 	go reconciler.Run(ctx)
+	
 	server := api.NewServer(db)
 
 	httpServer := &http.Server{
