@@ -10,6 +10,9 @@ import (
 	"mini-orchestrator/internal/api"
 	"mini-orchestrator/internal/node"
 	"mini-orchestrator/internal/store"
+	"mini-orchestrator/internal/controller"
+	"mini-orchestrator/internal/reconciler"
+	"mini-orchestrator/internal/scheduler"
 )
 
 func main() {
@@ -37,6 +40,23 @@ func main() {
 	)
 
 	go healthChecker.Run(context.Background())
+	schedulerEngine := scheduler.New()
+
+	schedulerService := scheduler.NewService(
+		db,
+		schedulerEngine,
+	)
+
+	replicaController := controller.NewReplicaController(db)
+
+	reconciler := reconciler.New(
+		db,
+		replicaController,
+		schedulerService,
+		5*time.Second,
+	)
+
+	go reconciler.Run(ctx)
 	server := api.NewServer(db)
 
 	httpServer := &http.Server{

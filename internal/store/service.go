@@ -123,3 +123,50 @@ func (p *Postgres) UpdateService(
 
 	return nil
 }
+
+func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT
+			id,
+			name,
+			image,
+			desired_replicas,
+			cpu_request_millis,
+			memory_request_mb,
+			created_at,
+			updated_at
+		FROM services
+		ORDER BY created_at
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+	defer rows.Close()
+
+	var services []model.Service
+
+	for rows.Next() {
+		var service model.Service
+
+		if err := rows.Scan(
+			&service.ID,
+			&service.Name,
+			&service.Image,
+			&service.DesiredReplicas,
+			&service.CPURequestMillis,
+			&service.MemoryRequestMB,
+			&service.CreatedAt,
+			&service.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan service: %w", err)
+		}
+
+		services = append(services, service)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate services: %w", err)
+	}
+
+	return services, nil
+}
