@@ -1,0 +1,6 @@
+ALTER TABLE services
+ADD COLUMN deployment_status VARCHAR(32)
+NOT NULL DEFAULT 'AVAILABLE';
+
+ALTER TABLE services
+ADD COLUMN deployment_started_at TIMESTAMP;

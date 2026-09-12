@@ -10,6 +10,16 @@ import (
 	"mini-orchestrator/internal/runtime"
 )
 
+// runtimeAdapter adapts the Docker runtime implementation to the node runtime interface.
+type runtimeAdapter struct {
+	*runtime.DockerRuntime
+}
+
+// Stats adapts the Docker runtime Stats API to the runtime.Runtime interface.
+func (a *runtimeAdapter) Stats(ctx context.Context, containerID string) (runtime.ContainerStats, error) {
+	return a.DockerRuntime.Stats(ctx, containerID)
+}
+
 func main() {
 	dockerRuntime, err := runtime.NewDockerRuntime()
 	if err != nil {
@@ -22,7 +32,7 @@ func main() {
 		CPUCapacity:     4000,
 		MemoryCapacity:  8192,
 		ControlPlaneURL: "http://localhost:8080",
-		Runtime:         dockerRuntime,
+		Runtime:         &runtimeAdapter{DockerRuntime: dockerRuntime},
 	}
 
 	ctx := context.Background()

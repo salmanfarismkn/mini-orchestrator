@@ -226,3 +226,49 @@ func (c *Client) DeleteContainer(
 
 	return nil
 }
+
+func (c *Client) GetContainer(
+	ctx context.Context,
+	nodeAddress string,
+	containerID string,
+) (runtime.Container, error) {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"http://"+nodeAddress+"/containers/"+containerID,
+		nil,
+	)
+	if err != nil {
+		return runtime.Container{}, fmt.Errorf(
+			"create inspect request: %w",
+			err,
+		)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return runtime.Container{}, fmt.Errorf(
+			"send inspect request: %w",
+			err,
+		)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return runtime.Container{}, fmt.Errorf(
+			"node returned status %d",
+			resp.StatusCode,
+		)
+	}
+
+	var container runtime.Container
+
+	if err := json.NewDecoder(resp.Body).Decode(&container); err != nil {
+		return runtime.Container{}, fmt.Errorf(
+			"decode container: %w",
+			err,
+		)
+	}
+
+	return container, nil
+}
