@@ -16,7 +16,7 @@ func TestCountActiveReplicas(t *testing.T) {
 		{ActualState: model.WorkloadStopped},
 	}
 
-	got := countActiveReplicas(workloads)
+	got := countActiveReplicas(workloads, 4)
 
 	if got != 4 {
 		t.Fatalf("expected 4 active replicas, got %d", got)

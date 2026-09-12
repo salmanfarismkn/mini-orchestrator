@@ -20,7 +20,6 @@ func NewReplicaController(store *store.Postgres) *ReplicaController {
 	}
 }
 
-
 func (c *ReplicaController) ReconcileService(
 	ctx context.Context,
 	service model.Service,
@@ -34,22 +33,31 @@ func (c *ReplicaController) ReconcileService(
 		)
 	}
 
-	activeReplicas := countActiveReplicas(workloads)
+	activeReplicas := countActiveReplicas(
+		workloads,
+		service.DeploymentVersion,
+	)
 
+	if hasOldActiveWorkloads(
+		workloads,
+		service.DeploymentVersion,
+	) {
+		return nil
+	}
 	// Scale up.
 	if activeReplicas < service.DesiredReplicas {
 		missing := service.DesiredReplicas - activeReplicas
 
 		for i := 0; i < missing; i++ {
 			workload := model.Workload{
-				ID:               newWorkloadID(),
-				ServiceID:        service.ID,
-				Image:            service.Image,
-				CPURequestMillis: service.CPURequestMillis,
-				MemoryRequestMB: service.MemoryRequestMB,
+				ID:                newWorkloadID(),
+				ServiceID:         service.ID,
+				Image:             service.Image,
+				CPURequestMillis:  service.CPURequestMillis,
+				MemoryRequestMB:   service.MemoryRequestMB,
 				DeploymentVersion: service.DeploymentVersion,
-				DesiredState:     model.WorkloadPending,
-				ActualState:      model.WorkloadPending,
+				DesiredState:      model.WorkloadPending,
+				ActualState:       model.WorkloadPending,
 			}
 
 			if err := c.store.CreatePendingWorkload(
@@ -96,15 +104,26 @@ func (c *ReplicaController) ReconcileService(
 	return nil
 }
 
-func countActiveReplicas(workloads []model.Workload) int {
+func countActiveReplicas(
+	workloads []model.Workload,
+	currentVersion int,
+) int {
 	count := 0
 
 	for _, workload := range workloads {
+		if workload.DeploymentVersion != 0 &&
+			workload.DeploymentVersion != currentVersion {
+			continue
+		}
+
 		switch workload.ActualState {
 		case model.WorkloadPending,
 			model.WorkloadScheduled,
 			model.WorkloadRunning:
-			count++
+
+			if workload.DesiredState != model.WorkloadStopped {
+				count++
+			}
 		}
 	}
 
@@ -143,4 +162,18 @@ func selectScaleDownCandidates(
 	}
 
 	return candidates
+}
+
+func hasOldActiveWorkloads(
+	workloads []model.Workload,
+	currentVersion int,
+) bool {
+	for _, workload := range workloads {
+		if workload.DeploymentVersion < currentVersion &&
+			isActive(workload) {
+			return true
+		}
+	}
+
+	return false
 }
