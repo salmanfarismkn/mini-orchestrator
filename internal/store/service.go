@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"mini-orchestrator/internal/model"
 )
@@ -11,7 +12,7 @@ func (p *Postgres) CreateService(
 	ctx context.Context,
 	service model.Service,
 ) error {
-    _, err := p.db.ExecContext(ctx, `
+	_, err := p.db.ExecContext(ctx, `
         INSERT INTO services (
             id,
             name,
@@ -22,6 +23,12 @@ func (p *Postgres) CreateService(
             deployment_version,
             max_surge,
             max_unavailable,
+            deployment_status,
+            deployment_started_at,
+            autoscaling_enabled,
+            autoscaling_min_replicas,
+            autoscaling_max_replicas,
+            autoscaling_target_cpu,
             created_at,
             updated_at
         )
@@ -29,18 +36,24 @@ func (p *Postgres) CreateService(
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
         )
     `,
-        service.ID,
-        service.Name,
-        service.Image,
-        service.DesiredReplicas,
-        service.CPURequestMillis,
-        service.MemoryRequestMB,
-        service.DeploymentVersion,
-        service.MaxSurge,
-        service.MaxUnavailable,
-        service.CreatedAt,
-        service.UpdatedAt,
-    )
+		service.ID,
+		service.Name,
+		service.Image,
+		service.DesiredReplicas,
+		service.CPURequestMillis,
+		service.MemoryRequestMB,
+		service.DeploymentVersion,
+		service.MaxSurge,
+		service.MaxUnavailable,
+		&service.DeploymentStatus,
+		&service.DeploymentStartedAt,
+        service.Autoscaling.Enabled,
+        service.Autoscaling.MinReplicas,
+        service.Autoscaling.MaxReplicas,
+        service.Autoscaling.TargetCPU,
+		service.CreatedAt,
+		service.UpdatedAt,
+	)
 
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
@@ -50,10 +63,10 @@ func (p *Postgres) CreateService(
 }
 
 func (p *Postgres) GetService(
-    ctx context.Context,
-    id string,
+	ctx context.Context,
+	id string,
 ) (model.Service, error) {
-    const query = `
+	const query = `
         SELECT
             id,
             name,
@@ -64,33 +77,45 @@ func (p *Postgres) GetService(
             deployment_version,
             max_surge,
             max_unavailable,
+            deployment_status,
+            deployment_started_at,
+            autoscaling_enabled,
+            autoscaling_min_replicas,
+            autoscaling_max_replicas,
+            autoscaling_target_cpu,
             created_at,
             updated_at
         FROM services
         WHERE id = $1
     `
 
-    var service model.Service
+	var service model.Service
 
-    err := p.db.QueryRowContext(ctx, query, id).Scan(
-        &service.ID,
-        &service.Name,
-        &service.Image,
-        &service.DesiredReplicas,
-        &service.CPURequestMillis,
-        &service.MemoryRequestMB,
-        &service.DeploymentVersion,
-        &service.MaxSurge,
-        &service.MaxUnavailable,
-        &service.CreatedAt,
-        &service.UpdatedAt,
-    )
+	err := p.db.QueryRowContext(ctx, query, id).Scan(
+		&service.ID,
+		&service.Name,
+		&service.Image,
+		&service.DesiredReplicas,
+		&service.CPURequestMillis,
+		&service.MemoryRequestMB,
+		&service.DeploymentVersion,
+		&service.MaxSurge,
+		&service.MaxUnavailable,
+		&service.DeploymentStatus,
+		&service.DeploymentStartedAt,
+		&service.Autoscaling.Enabled,
+		&service.Autoscaling.MinReplicas,
+		&service.Autoscaling.MaxReplicas,
+		&service.Autoscaling.TargetCPU,
+		&service.CreatedAt,
+		&service.UpdatedAt,
+	)
 
-    if err != nil {
-        return model.Service{}, fmt.Errorf("get service %q: %w", id, err)
-    }
+	if err != nil {
+		return model.Service{}, fmt.Errorf("get service %q: %w", id, err)
+	}
 
-    return service, nil
+	return service, nil
 }
 
 func (p *Postgres) UpdateService(
@@ -130,7 +155,7 @@ func (p *Postgres) UpdateService(
 }
 
 func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
-    rows, err := p.db.QueryContext(ctx, `
+	rows, err := p.db.QueryContext(ctx, `
         SELECT
             id,
             name,
@@ -141,43 +166,135 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
             deployment_version,
             max_surge,
             max_unavailable,
+            deployment_status,
+            deployment_started_at,
+            autoscaling_enabled,
+            autoscaling_min_replicas,
+            autoscaling_max_replicas,
+            autoscaling_target_cpu,
             created_at,
             updated_at
         FROM services
         ORDER BY created_at
     `)
-    if err != nil {
-        return nil, fmt.Errorf("list services: %w", err)
-    }
-    defer rows.Close()
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+	defer rows.Close()
 
-    var services []model.Service
+	var services []model.Service
 
-    for rows.Next() {
-        var service model.Service
+	for rows.Next() {
+		var service model.Service
 
-        if err := rows.Scan(
-            &service.ID,
-            &service.Name,
-            &service.Image,
-            &service.DesiredReplicas,
-            &service.CPURequestMillis,
-            &service.MemoryRequestMB,
-            &service.DeploymentVersion,
-            &service.MaxSurge,
-            &service.MaxUnavailable,
-            &service.CreatedAt,
-            &service.UpdatedAt,
-        ); err != nil {
-            return nil, fmt.Errorf("scan service: %w", err)
-        }
+		if err := rows.Scan(
+			&service.ID,
+			&service.Name,
+			&service.Image,
+			&service.DesiredReplicas,
+			&service.CPURequestMillis,
+			&service.MemoryRequestMB,
+			&service.DeploymentVersion,
+			&service.MaxSurge,
+			&service.MaxUnavailable,
+			&service.DeploymentStatus,
+			&service.DeploymentStartedAt,
+			&service.Autoscaling.Enabled,
+			&service.Autoscaling.MinReplicas,
+			&service.Autoscaling.MaxReplicas,
+			&service.Autoscaling.TargetCPU,
+			&service.CreatedAt,
+			&service.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan service: %w", err)
+		}
 
-        services = append(services, service)
-    }
+		services = append(services, service)
+	}
 
-    if err := rows.Err(); err != nil {
-        return nil, fmt.Errorf("iterate services: %w", err)
-    }
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate services: %w", err)
+	}
 
-    return services, nil
+	return services, nil
+}
+
+func (p *Postgres) StartDeployment(
+	ctx context.Context,
+	serviceID string,
+	version int,
+	startedAt time.Time,
+) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE services
+		SET
+			deployment_version = $1,
+			deployment_status = $2,
+			deployment_started_at = $3,
+			updated_at = NOW()
+		WHERE id = $4
+	`,
+		version,
+		model.DeploymentProgressing,
+		startedAt,
+		serviceID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("start deployment: %w", err)
+	}
+
+	return nil
+}
+
+func (p *Postgres) UpdateDeploymentStatus(
+	ctx context.Context,
+	serviceID string,
+	status model.DeploymentStatus,
+) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE services
+		SET
+			deployment_status = $1,
+			updated_at = NOW()
+		WHERE id = $2
+	`,
+		status,
+		serviceID,
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"update deployment status: %w",
+			err,
+		)
+	}
+
+	return nil
+}
+
+func (p *Postgres) UpdateDesiredReplicas(
+	ctx context.Context,
+	serviceID string,
+	replicas int,
+) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE services
+		SET
+			desired_replicas = $1,
+			updated_at = NOW()
+		WHERE id = $2
+	`,
+		replicas,
+		serviceID,
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"update desired replicas: %w",
+			err,
+		)
+	}
+
+	return nil
 }

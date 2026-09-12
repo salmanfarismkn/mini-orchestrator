@@ -2,6 +2,15 @@ package model
 
 import "time"
 
+type DeploymentStatus string
+
+const (
+	DeploymentPending     DeploymentStatus = "PENDING"
+	DeploymentProgressing  DeploymentStatus = "PROGRESSING"
+	DeploymentAvailable    DeploymentStatus = "AVAILABLE"
+	DeploymentFailed       DeploymentStatus = "FAILED"
+)
+
 type Service struct {
 	ID                string
 	Name              string
@@ -14,6 +23,18 @@ type Service struct {
 	MaxSurge       int
 	MaxUnavailable int
 
+	DeploymentStatus    DeploymentStatus
+	DeploymentStartedAt *time.Time
+
+	Autoscaling AutoscalingConfig
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type AutoscalingConfig struct {
+	Enabled     bool
+	MinReplicas int
+	MaxReplicas int
+	TargetCPU   float64
 }

@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"encoding/json"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	
 )
 
 type DockerRuntime struct {
@@ -232,4 +234,45 @@ func (d *DockerRuntime) List(
 	}
 
 	return result, nil
+}
+
+func calculateCPUUsage(
+	previousCPU uint64,
+	currentCPU uint64,
+	previousSystem uint64,
+	currentSystem uint64,
+	numCPUs uint64,
+) int {
+	cpuDelta := currentCPU - previousCPU
+	systemDelta := currentSystem - previousSystem
+
+	if systemDelta == 0 {
+		return 0
+	}
+
+	usage := float64(cpuDelta) /
+		float64(systemDelta) *
+		float64(numCPUs) *
+		1000
+
+	return int(usage)
+}
+
+func (d *DockerRuntime) Stats(ctx context.Context, containerID string) (ContainerStats, error) {
+    // false = one-shot stats, not continuous stream
+    resp, err := d.client.ContainerStats(ctx, containerID, false)
+    if err != nil {
+        return ContainerStats{}, fmt.Errorf("get stats for container %q: %w", containerID, err)
+    }
+    defer resp.Body.Close()
+
+    var stats types.StatsJSON
+    if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+        return ContainerStats{}, fmt.Errorf("decode stats: %w", err)
+    }
+
+    // Map Docker stats into your own struct
+    return ContainerStats{
+        CPUUsageMillis: int(stats.CPUStats.CPUUsage.TotalUsage / 1_000_000), // nanoseconds → millis
+    }, nil
 }

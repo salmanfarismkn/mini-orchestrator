@@ -12,32 +12,35 @@ import (
 )
 
 type Reconciler struct {
-	store              *store.Postgres
+	store                *store.Postgres
+	replicaController    *controller.ReplicaController
 	deploymentController *controller.DeploymentController
-	replicaController  *controller.ReplicaController
-	schedulerService   *scheduler.Service
-	executor           *WorkloadExecutor
-	runtimeReconciler  *RuntimeReconciler
-	interval           time.Duration
+	deploymentStatus     *controller.DeploymentStatusController
+	schedulerService     *scheduler.Service
+	executor             *WorkloadExecutor
+	runtimeReconciler    *RuntimeReconciler
+	interval             time.Duration
 }
 
 func New(
 	store *store.Postgres,
-	deploymentController *controller.DeploymentController,
 	replicaController *controller.ReplicaController,
+	deploymentController *controller.DeploymentController,
+	deploymentStatus *controller.DeploymentStatusController,
 	schedulerService *scheduler.Service,
 	executor *WorkloadExecutor,
 	runtimeReconciler *RuntimeReconciler,
 	interval time.Duration,
 ) *Reconciler {
 	return &Reconciler{
-		store:               store,
+		store:                store,
+		replicaController:    replicaController,
 		deploymentController: deploymentController,
-		replicaController:  replicaController,
-		schedulerService:    schedulerService,
-		executor:            executor,
-		runtimeReconciler:   runtimeReconciler,
-		interval:           interval,
+		deploymentStatus:     deploymentStatus,
+		schedulerService:     schedulerService,
+		executor:             executor,
+		runtimeReconciler:    runtimeReconciler,
+		interval:             interval,
 	}
 }
 
@@ -150,6 +153,17 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 		); err != nil {
 			slog.Error(
 				"workload scheduling failed",
+				"service_id", service.ID,
+				"error", err,
+			)
+		}
+		
+		if err := r.deploymentStatus.ReconcileService(
+			ctx,
+			service,
+		); err != nil {
+			slog.Error(
+				"deployment status reconciliation failed",
 				"service_id", service.ID,
 				"error", err,
 			)

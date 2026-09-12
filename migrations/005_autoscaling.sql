@@ -1,0 +1,11 @@
+ALTER TABLE services
+ADD COLUMN autoscaling_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE services
+ADD COLUMN autoscaling_min_replicas INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE services
+ADD COLUMN autoscaling_max_replicas INTEGER NOT NULL DEFAULT 10;
+
+ALTER TABLE services
+ADD COLUMN autoscaling_target_cpu DOUBLE PRECISION NOT NULL DEFAULT 70;

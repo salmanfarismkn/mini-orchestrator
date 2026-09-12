@@ -13,6 +13,9 @@ import (
 	"mini-orchestrator/internal/controller"
 	"mini-orchestrator/internal/reconciler"
 	"mini-orchestrator/internal/scheduler"
+	"mini-orchestrator/internal/autoscaler"
+	"mini-orchestrator/internal/metrics"
+
 )
 
 func main() {
@@ -57,16 +60,35 @@ func main() {
 	)
 	replicaController := controller.NewReplicaController(db)
 	deploymentController := controller.NewDeploymentController(db)
+	deploymentStatus := controller.NewDeploymentStatusController(db,2*time.Minute,)
+
 	reconciler := reconciler.New(
 		db,
-		deploymentController,
 		replicaController,
+		deploymentController,
+		deploymentStatus,
 		schedulerService,
 		executor,
 		runtimeReconciler,
 		5*time.Second,
 	)
+	metricsProvider := metrics.NewNodeProvider(
+		db,
+		nodeClient,
+	)
 
+	autoscalerSvc := autoscaler.New(
+		db,
+		metricsProvider,
+	)
+
+	autoscalerLoop := autoscaler.NewLoop(
+		db,
+		autoscalerSvc,
+		30*time.Second,
+	)
+
+	go autoscalerLoop.Run(ctx)
 	go reconciler.Run(ctx)
 	
 	server := api.NewServer(db)
