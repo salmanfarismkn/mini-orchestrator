@@ -272,3 +272,50 @@ func (c *Client) GetContainer(
 
 	return container, nil
 }
+
+func (c *Client) GetContainerStats(
+	ctx context.Context,
+	nodeAddress string,
+	containerID string,
+) (runtime.ContainerStats, error) {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		"http://"+nodeAddress+
+			"/containers/"+containerID+"/stats",
+		nil,
+	)
+	if err != nil {
+		return runtime.ContainerStats{}, fmt.Errorf(
+			"create stats request: %w",
+			err,
+		)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return runtime.ContainerStats{}, fmt.Errorf(
+			"send stats request: %w",
+			err,
+		)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return runtime.ContainerStats{}, fmt.Errorf(
+			"node returned status %d while getting stats",
+			resp.StatusCode,
+		)
+	}
+
+	var stats runtime.ContainerStats
+
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return runtime.ContainerStats{}, fmt.Errorf(
+			"decode container stats: %w",
+			err,
+		)
+	}
+
+	return stats, nil
+}

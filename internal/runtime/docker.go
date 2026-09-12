@@ -2,15 +2,16 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
-	"encoding/json"
+	"strings"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
-	
 )
 
 type DockerRuntime struct {
@@ -64,7 +65,8 @@ func (d *DockerRuntime) Create(
 	resp, err := d.client.ContainerCreate(
 		ctx,
 		&container.Config{
-			Image: config.Image,
+			Image:  config.Image,
+			Labels: map[string]string{"mini-orchestrator": "true"},
 		},
 		&container.HostConfig{
 			Resources: container.Resources{
@@ -196,13 +198,30 @@ func (d *DockerRuntime) Inspect(
 	}, nil
 }
 
+func isOrchestratorManagedContainer(c types.Container) bool {
+	if c.Labels != nil {
+		if value, ok := c.Labels["mini-orchestrator"]; ok && value == "true" {
+			return true
+		}
+	}
+
+	for _, name := range c.Names {
+		if strings.HasPrefix(name, "/workload-") {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (d *DockerRuntime) List(
 	ctx context.Context,
 ) ([]Container, error) {
 	containers, err := d.client.ContainerList(
 		ctx,
 		container.ListOptions{
-			All: true,
+			All:     true,
+			Filters: filters.NewArgs(filters.Arg("label", "mini-orchestrator=true")),
 		},
 	)
 	if err != nil {
@@ -215,6 +234,10 @@ func (d *DockerRuntime) List(
 	result := make([]Container, 0, len(containers))
 
 	for _, c := range containers {
+		if !isOrchestratorManagedContainer(c) {
+			continue
+		}
+
 		name := ""
 
 		if len(c.Names) > 0 {
@@ -258,21 +281,60 @@ func calculateCPUUsage(
 	return int(usage)
 }
 
-func (d *DockerRuntime) Stats(ctx context.Context, containerID string) (ContainerStats, error) {
-    // false = one-shot stats, not continuous stream
-    resp, err := d.client.ContainerStats(ctx, containerID, false)
-    if err != nil {
-        return ContainerStats{}, fmt.Errorf("get stats for container %q: %w", containerID, err)
-    }
-    defer resp.Body.Close()
+func (d *DockerRuntime) Stats(
+	ctx context.Context,
+	containerID string,
+) (ContainerStats, error) {
+	response, err := d.client.ContainerStats(
+		ctx,
+		containerID,
+		false,
+	)
+	if err != nil {
+		return ContainerStats{}, fmt.Errorf(
+			"get container stats: %w",
+			err,
+		)
+	}
+	defer response.Body.Close()
 
-    var stats types.StatsJSON
-    if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
-        return ContainerStats{}, fmt.Errorf("decode stats: %w", err)
-    }
+	var stats types.StatsJSON
+	if err := json.NewDecoder(response.Body).Decode(&stats); err != nil {
+		if err == io.EOF {
+			return ContainerStats{}, fmt.Errorf("docker stats stream ended")
+		}
+		return ContainerStats{}, fmt.Errorf(
+			"decode container stats: %w",
+			err,
+		)
+	}
 
-    // Map Docker stats into your own struct
-    return ContainerStats{
-        CPUUsageMillis: int(stats.CPUStats.CPUUsage.TotalUsage / 1_000_000), // nanoseconds → millis
-    }, nil
+	cpuDelta := stats.CPUStats.CPUUsage.TotalUsage -
+		stats.PreCPUStats.CPUUsage.TotalUsage
+	if stats.PreCPUStats.SystemUsage == 0 {
+		return ContainerStats{}, nil
+	}
+
+	systemDelta := stats.CPUStats.SystemUsage -
+		stats.PreCPUStats.SystemUsage
+	if systemDelta == 0 {
+		return ContainerStats{}, nil
+	}
+
+	numCPUs := stats.CPUStats.OnlineCPUs
+	if numCPUs == 0 {
+		numCPUs = uint32(len(stats.CPUStats.CPUUsage.PercpuUsage))
+	}
+	if numCPUs == 0 {
+		return ContainerStats{}, nil
+	}
+
+	cpuMillis := float64(cpuDelta) /
+		float64(systemDelta) *
+		float64(numCPUs) *
+		1000
+
+	return ContainerStats{
+		CPUUsageMillis: int(cpuMillis),
+	}, nil
 }

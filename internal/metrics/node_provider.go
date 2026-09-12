@@ -27,7 +27,10 @@ func (p *NodeProvider) GetWorkloadMetrics(
 	ctx context.Context,
 	workloadID string,
 ) (WorkloadMetrics, error) {
-	workload, err := p.store.GetWorkload(ctx, workloadID)
+	workload, err := p.store.GetWorkload(
+		ctx,
+		workloadID,
+	)
 	if err != nil {
 		return WorkloadMetrics{}, fmt.Errorf(
 			"get workload: %w",
@@ -49,19 +52,19 @@ func (p *NodeProvider) GetWorkloadMetrics(
 		)
 	}
 
-	container, err := p.nodeClient.GetContainer(
+	stats, err := p.nodeClient.GetContainerStats(
 		ctx,
 		*workload.NodeID,
 		*workload.ContainerID,
 	)
 	if err != nil {
 		return WorkloadMetrics{}, fmt.Errorf(
-			"get container metrics: %w",
+			"get container stats: %w",
 			err,
 		)
 	}
 
 	return WorkloadMetrics{
-		CPUUsageMillis: container.CPUUsageMillis,
+		CPUUsageMillis: stats.CPUUsageMillis,
 	}, nil
 }
