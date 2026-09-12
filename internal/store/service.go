@@ -11,30 +11,36 @@ func (p *Postgres) CreateService(
 	ctx context.Context,
 	service model.Service,
 ) error {
-	_, err := p.db.ExecContext(ctx, `
-		INSERT INTO services (
-			id,
-			name,
-			image,
-			desired_replicas,
-			cpu_request_millis,
-			memory_request_mb,
-			deployment_version,
-			created_at,
-			updated_at
-		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`,
-		service.ID,
-		service.Name,
-		service.Image,
-		service.DesiredReplicas,
-		service.CPURequestMillis,
-		service.MemoryRequestMB,
-		service.DeploymentVersion,
-		service.CreatedAt,
-		service.UpdatedAt,
-	)
+    _, err := p.db.ExecContext(ctx, `
+        INSERT INTO services (
+            id,
+            name,
+            image,
+            desired_replicas,
+            cpu_request_millis,
+            memory_request_mb,
+            deployment_version,
+            max_surge,
+            max_unavailable,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+        )
+    `,
+        service.ID,
+        service.Name,
+        service.Image,
+        service.DesiredReplicas,
+        service.CPURequestMillis,
+        service.MemoryRequestMB,
+        service.DeploymentVersion,
+        service.MaxSurge,
+        service.MaxUnavailable,
+        service.CreatedAt,
+        service.UpdatedAt,
+    )
 
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
@@ -56,6 +62,8 @@ func (p *Postgres) GetService(
             cpu_request_millis,
             memory_request_mb,
             deployment_version,
+            max_surge,
+            max_unavailable,
             created_at,
             updated_at
         FROM services
@@ -72,6 +80,8 @@ func (p *Postgres) GetService(
         &service.CPURequestMillis,
         &service.MemoryRequestMB,
         &service.DeploymentVersion,
+        &service.MaxSurge,
+        &service.MaxUnavailable,
         &service.CreatedAt,
         &service.UpdatedAt,
     )
@@ -129,6 +139,8 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
             cpu_request_millis,
             memory_request_mb,
             deployment_version,
+            max_surge,
+            max_unavailable,
             created_at,
             updated_at
         FROM services
@@ -152,6 +164,8 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
             &service.CPURequestMillis,
             &service.MemoryRequestMB,
             &service.DeploymentVersion,
+            &service.MaxSurge,
+            &service.MaxUnavailable,
             &service.CreatedAt,
             &service.UpdatedAt,
         ); err != nil {
