@@ -34,6 +34,10 @@ func (a *Agent) Routes() http.Handler {
 		"DELETE /containers/{id}",
 		a.RemoveContainer,
 	)
-
+	
+	mux.HandleFunc(
+		"GET /containers/{id}/stats",
+		a.stats,
+	)
 	return mux
 }

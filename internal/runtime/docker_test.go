@@ -54,4 +54,13 @@ func TestDockerRuntime(t *testing.T) {
 			info.Status,
 		)
 	}
+
+	stats, err := runtime.Stats(ctx, container.ID)
+	if err != nil {
+		t.Fatalf("get container stats: %v", err)
+	}
+
+	if stats.CPUUsageMillis < 0 {
+		t.Fatalf("expected non-negative CPU usage, got %d", stats.CPUUsageMillis)
+	}
 }

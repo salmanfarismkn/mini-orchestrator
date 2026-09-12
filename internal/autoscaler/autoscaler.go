@@ -35,21 +35,27 @@ func (a *Autoscaler) ReconcileService(
 		return nil
 	}
 
+	if config.TargetCPU <= 0 {
+		return nil
+	}
+
 	workloads, err := a.store.ListWorkloadsByService(
 		ctx,
 		service.ID,
 	)
 	if err != nil {
-		return fmt.Errorf("list workloads: %w", err)
+		return fmt.Errorf(
+			"list workloads: %w",
+			err,
+		)
 	}
 
-	var (
-		totalUsage   float64
-		measuredPods int
-	)
+	var totalUsage float64
+	running := 0
 
 	for _, workload := range workloads {
-		if workload.DeploymentVersion != service.DeploymentVersion {
+		if workload.DeploymentVersion !=
+			service.DeploymentVersion {
 			continue
 		}
 
@@ -57,7 +63,7 @@ func (a *Autoscaler) ReconcileService(
 			continue
 		}
 
-		usage, err := a.metrics.GetWorkloadMetrics(
+		stats, err := a.metrics.GetWorkloadMetrics(
 			ctx,
 			workload.ID,
 		)
@@ -65,25 +71,24 @@ func (a *Autoscaler) ReconcileService(
 			continue
 		}
 
-		totalUsage += float64(usage.CPUUsageMillis)
-		measuredPods++
+		totalUsage += float64(stats.CPUUsageMillis)
+		running++
 	}
 
-	if measuredPods == 0 {
+	if running == 0 {
 		return nil
 	}
 
-	// add this if required: averageUsage := totalUsage / float64(measuredPods)
+	targetPerReplica :=
+		float64(service.CPURequestMillis) *
+			config.TargetCPU / 100
 
-	target := float64(service.CPURequestMillis) *
-		config.TargetCPU / 100
-
-	if target <= 0 {
+	if targetPerReplica <= 0 {
 		return nil
 	}
 
 	desired := int(math.Ceil(
-		totalUsage / target,
+		totalUsage / targetPerReplica,
 	))
 
 	if desired < config.MinReplicas {
