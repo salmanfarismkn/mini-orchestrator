@@ -27,7 +27,7 @@ type Service struct {
 	DeploymentStartedAt *time.Time
 
 	Autoscaling AutoscalingConfig
-
+	AutoscalingLastScaledAt *time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -37,4 +37,9 @@ type AutoscalingConfig struct {
 	MinReplicas int
 	MaxReplicas int
 	TargetCPU   float64
+
+	ScaleUpCooldownSeconds   int
+	ScaleDownCooldownSeconds int
+	RequiredObservations     int
+	MaxScaleStep             int
 }

@@ -3,11 +3,12 @@ package runtime
 import "context"
 
 type ContainerConfig struct {
-	Name      string
-	Image     string
-	CPUMillis int
-	MemoryMB  int
+    Name      string 
+    Image     string 
+    CPUMillis int    
+    MemoryMB  int    
 }
+
 
 type Container struct {
 	ID     string

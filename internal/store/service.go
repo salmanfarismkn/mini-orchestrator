@@ -29,6 +29,11 @@ func (p *Postgres) CreateService(
             autoscaling_min_replicas,
             autoscaling_max_replicas,
             autoscaling_target_cpu,
+			autoscaling_scale_up_cooldown_seconds,
+			autoscaling_scale_down_cooldown_seconds,
+			autoscaling_required_observations,
+			autoscaling_max_scale_step,
+			autoscaling_last_scaled_at,
             created_at,
             updated_at
         )
@@ -51,6 +56,11 @@ func (p *Postgres) CreateService(
         service.Autoscaling.MinReplicas,
         service.Autoscaling.MaxReplicas,
         service.Autoscaling.TargetCPU,
+		service.Autoscaling.ScaleUpCooldownSeconds,
+		service.Autoscaling.ScaleDownCooldownSeconds,
+		service.Autoscaling.RequiredObservations,
+		service.Autoscaling.MaxScaleStep,
+		service.AutoscalingLastScaledAt,
 		service.CreatedAt,
 		service.UpdatedAt,
 	)
@@ -83,6 +93,11 @@ func (p *Postgres) GetService(
             autoscaling_min_replicas,
             autoscaling_max_replicas,
             autoscaling_target_cpu,
+			autoscaling_scale_up_cooldown_seconds,
+			autoscaling_scale_down_cooldown_seconds,
+			autoscaling_required_observations,
+			autoscaling_max_scale_step,
+			autoscaling_last_scaled_at,
             created_at,
             updated_at
         FROM services
@@ -107,6 +122,11 @@ func (p *Postgres) GetService(
 		&service.Autoscaling.MinReplicas,
 		&service.Autoscaling.MaxReplicas,
 		&service.Autoscaling.TargetCPU,
+		&service.Autoscaling.ScaleUpCooldownSeconds,
+		&service.Autoscaling.ScaleDownCooldownSeconds,
+		&service.Autoscaling.RequiredObservations,
+		&service.Autoscaling.MaxScaleStep,
+		&service.AutoscalingLastScaledAt,
 		&service.CreatedAt,
 		&service.UpdatedAt,
 	)
@@ -172,6 +192,11 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
             autoscaling_min_replicas,
             autoscaling_max_replicas,
             autoscaling_target_cpu,
+			autoscaling_scale_up_cooldown_seconds,
+			autoscaling_scale_down_cooldown_seconds,
+			autoscaling_required_observations,
+			autoscaling_max_scale_step,
+			autoscaling_last_scaled_at,
             created_at,
             updated_at
         FROM services
@@ -203,6 +228,11 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
 			&service.Autoscaling.MinReplicas,
 			&service.Autoscaling.MaxReplicas,
 			&service.Autoscaling.TargetCPU,
+			&service.Autoscaling.ScaleUpCooldownSeconds,
+			&service.Autoscaling.ScaleDownCooldownSeconds,
+			&service.Autoscaling.RequiredObservations,
+			&service.Autoscaling.MaxScaleStep,
+			&service.AutoscalingLastScaledAt,
 			&service.CreatedAt,
 			&service.UpdatedAt,
 		); err != nil {
@@ -282,6 +312,7 @@ func (p *Postgres) UpdateDesiredReplicas(
 		UPDATE services
 		SET
 			desired_replicas = $1,
+			autoscaling_last_scaled_at = NOW(),
 			updated_at = NOW()
 		WHERE id = $2
 	`,
