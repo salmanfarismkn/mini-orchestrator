@@ -2,9 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
-	"log/slog"
 
 	"mini-orchestrator/internal/model"
 	"mini-orchestrator/internal/store"
@@ -197,14 +197,14 @@ func (s *Server) createService(
 
 	if req.Autoscaling != nil {
 		autoscaling = model.AutoscalingConfig{
-			Enabled:                   req.Autoscaling.Enabled,
-			MinReplicas:               req.Autoscaling.MinReplicas,
-			MaxReplicas:               req.Autoscaling.MaxReplicas,
-			TargetCPU:                 req.Autoscaling.TargetCPU,
-			ScaleUpCooldownSeconds:    req.Autoscaling.ScaleUpCooldownSeconds,
-			ScaleDownCooldownSeconds:  req.Autoscaling.ScaleDownCooldownSeconds,
-			RequiredObservations:      req.Autoscaling.RequiredObservations,
-			MaxScaleStep:              req.Autoscaling.MaxScaleStep,
+			Enabled:                  req.Autoscaling.Enabled,
+			MinReplicas:              req.Autoscaling.MinReplicas,
+			MaxReplicas:              req.Autoscaling.MaxReplicas,
+			TargetCPU:                req.Autoscaling.TargetCPU,
+			ScaleUpCooldownSeconds:   req.Autoscaling.ScaleUpCooldownSeconds,
+			ScaleDownCooldownSeconds: req.Autoscaling.ScaleDownCooldownSeconds,
+			RequiredObservations:     req.Autoscaling.RequiredObservations,
+			MaxScaleStep:             req.Autoscaling.MaxScaleStep,
 		}
 	}
 
@@ -214,7 +214,7 @@ func (s *Server) createService(
 		Image:             req.Image,
 		DesiredReplicas:   req.Replicas,
 		CPURequestMillis:  req.CPURequestMillis,
-		MemoryRequestMB:  req.MemoryRequestMB,
+		MemoryRequestMB:   req.MemoryRequestMB,
 		DeploymentVersion: 1,
 
 		MaxSurge:       req.MaxSurge,
@@ -368,4 +368,31 @@ func (s *Server) updateService(
 	)
 
 	_ = json.NewEncoder(w).Encode(service)
+}
+
+func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	if id == "" {
+		http.Error(w, "service id is required", http.StatusBadRequest)
+		return
+	}
+
+	service, err := s.store.GetService(r.Context(), id)
+	if err != nil {
+		http.Error(w, "service not found", http.StatusNotFound)
+		return
+	}
+
+	if service.Status == model.ServiceDeleted {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if err := s.store.MarkServiceDeleting(r.Context(), id); err != nil {
+		http.Error(w, "failed to delete service", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
 }

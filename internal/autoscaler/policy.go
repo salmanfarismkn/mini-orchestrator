@@ -23,14 +23,14 @@ func cooldownActive(
 		return elapsed <
 			time.Duration(
 				service.Autoscaling.ScaleUpCooldownSeconds,
-			) * time.Second
+			)*time.Second
 	}
 
 	if desired < service.DesiredReplicas {
 		return elapsed <
 			time.Duration(
 				service.Autoscaling.ScaleDownCooldownSeconds,
-			) * time.Second
+			)*time.Second
 	}
 
 	return false

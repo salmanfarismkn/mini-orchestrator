@@ -9,9 +9,9 @@ import (
 )
 
 type Loop struct {
-	store     *store.Postgres
+	store      *store.Postgres
 	autoscaler *Autoscaler
-	interval  time.Duration
+	interval   time.Duration
 }
 
 func NewLoop(

@@ -32,10 +32,10 @@ type CreateContainerRequest struct {
 }
 
 type CreateContainerResponse struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Image   string `json:"image"`
-	Status  string `json:"status"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	Status string `json:"status"`
 }
 
 func (c *Client) CreateContainer(

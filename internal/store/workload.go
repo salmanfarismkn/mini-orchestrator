@@ -8,10 +8,10 @@ import (
 )
 
 func (p *Postgres) CreateWorkload(
-    ctx context.Context,
-    workload model.Workload,
+	ctx context.Context,
+	workload model.Workload,
 ) error {
-    const query = `
+	const query = `
         INSERT INTO workloads (
             id,
             service_id,
@@ -29,30 +29,29 @@ func (p *Postgres) CreateWorkload(
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
     `
 
-    _, err := p.db.ExecContext(
-        ctx,
-        query,
-        workload.ID,
-        workload.ServiceID,
-        workload.NodeID,
-        workload.ContainerID,
-        workload.Image,
-        workload.CPURequestMillis,
-        workload.MemoryRequestMB,
-        workload.DeploymentVersion,
-        workload.DesiredState,
-        workload.ActualState,
-        workload.CreatedAt,
-        workload.UpdatedAt,
-    )
+	_, err := p.db.ExecContext(
+		ctx,
+		query,
+		workload.ID,
+		workload.ServiceID,
+		workload.NodeID,
+		workload.ContainerID,
+		workload.Image,
+		workload.CPURequestMillis,
+		workload.MemoryRequestMB,
+		workload.DeploymentVersion,
+		workload.DesiredState,
+		workload.ActualState,
+		workload.CreatedAt,
+		workload.UpdatedAt,
+	)
 
-    if err != nil {
-        return fmt.Errorf("create workload %q: %w", workload.ID, err)
-    }
+	if err != nil {
+		return fmt.Errorf("create workload %q: %w", workload.ID, err)
+	}
 
-    return nil
+	return nil
 }
-
 
 func (p *Postgres) GetWorkload(
 	ctx context.Context,
@@ -443,10 +442,10 @@ func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
 	defer tx.Rollback()
 
 	var (
-		nodeID           *string
-		cpuRequest       int
-		memoryRequest    int
-		actualState      model.WorkloadState
+		nodeID        *string
+		cpuRequest    int
+		memoryRequest int
+		actualState   model.WorkloadState
 	)
 
 	err = tx.QueryRowContext(ctx, `
@@ -562,9 +561,9 @@ func (p *Postgres) RecoverWorkloadsFromNode(
 	defer rows.Close()
 
 	type workloadResource struct {
-		ID        string
-		CPU       int
-		Memory    int
+		ID     string
+		CPU    int
+		Memory int
 	}
 
 	var workloads []workloadResource
@@ -752,4 +751,3 @@ func (p *Postgres) MarkWorkloadStoppedAndReleaseResources(
 
 	return nil
 }
-

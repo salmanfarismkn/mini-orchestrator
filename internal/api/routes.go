@@ -30,5 +30,10 @@ func (s *Server) Routes() http.Handler {
 		s.updateService,
 	)
 
+	mux.HandleFunc(
+		"DELETE /services/{id}",
+		s.deleteService,
+	)
+
 	return mux
 }

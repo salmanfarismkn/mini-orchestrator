@@ -33,7 +33,9 @@ func (a *Autoscaler) ReconcileService(
 	ctx context.Context,
 	service model.Service,
 ) error {
-	
+	if service.Status != model.ServiceActive {
+		return nil
+	}
 	a.cleanupObservations(time.Now())
 
 	config := service.Autoscaling
@@ -42,7 +44,7 @@ func (a *Autoscaler) ReconcileService(
 		model.DeploymentProgressing {
 		return nil
 	}
-	
+
 	if !config.Enabled {
 		return nil
 	}

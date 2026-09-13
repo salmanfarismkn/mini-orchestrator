@@ -3,18 +3,17 @@ package runtime
 import "context"
 
 type ContainerConfig struct {
-    Name      string 
-    Image     string 
-    CPUMillis int    
-    MemoryMB  int    
+	Name      string
+	Image     string
+	CPUMillis int
+	MemoryMB  int
 }
 
-
 type Container struct {
-	ID     string
-	Name   string
-	Image  string
-	Status string
+	ID             string
+	Name           string
+	Image          string
+	Status         string
 	CPUUsageMillis int
 }
 
@@ -29,5 +28,5 @@ type Runtime interface {
 	Remove(ctx context.Context, containerID string) error
 	Inspect(ctx context.Context, containerID string) (Container, error)
 	List(ctx context.Context) ([]Container, error)
-	Stats(ctx context.Context,containerID string,) (ContainerStats, error)
+	Stats(ctx context.Context, containerID string) (ContainerStats, error)
 }

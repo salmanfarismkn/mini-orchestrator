@@ -34,11 +34,12 @@ func (p *Postgres) CreateService(
 			autoscaling_required_observations,
 			autoscaling_max_scale_step,
 			autoscaling_last_scaled_at,
+			status,
             created_at,
             updated_at
         )
         VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
         )
     `,
 		service.ID,
@@ -52,15 +53,16 @@ func (p *Postgres) CreateService(
 		service.MaxUnavailable,
 		&service.DeploymentStatus,
 		&service.DeploymentStartedAt,
-        service.Autoscaling.Enabled,
-        service.Autoscaling.MinReplicas,
-        service.Autoscaling.MaxReplicas,
-        service.Autoscaling.TargetCPU,
+		service.Autoscaling.Enabled,
+		service.Autoscaling.MinReplicas,
+		service.Autoscaling.MaxReplicas,
+		service.Autoscaling.TargetCPU,
 		service.Autoscaling.ScaleUpCooldownSeconds,
 		service.Autoscaling.ScaleDownCooldownSeconds,
 		service.Autoscaling.RequiredObservations,
 		service.Autoscaling.MaxScaleStep,
 		service.AutoscalingLastScaledAt,
+		service.Status,
 		service.CreatedAt,
 		service.UpdatedAt,
 	)
@@ -98,6 +100,7 @@ func (p *Postgres) GetService(
 			autoscaling_required_observations,
 			autoscaling_max_scale_step,
 			autoscaling_last_scaled_at,
+			status,
             created_at,
             updated_at
         FROM services
@@ -127,6 +130,7 @@ func (p *Postgres) GetService(
 		&service.Autoscaling.RequiredObservations,
 		&service.Autoscaling.MaxScaleStep,
 		&service.AutoscalingLastScaledAt,
+		&service.Status,
 		&service.CreatedAt,
 		&service.UpdatedAt,
 	)
@@ -197,6 +201,7 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
 			autoscaling_required_observations,
 			autoscaling_max_scale_step,
 			autoscaling_last_scaled_at,
+			status,
             created_at,
             updated_at
         FROM services
@@ -233,6 +238,7 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
 			&service.Autoscaling.RequiredObservations,
 			&service.Autoscaling.MaxScaleStep,
 			&service.AutoscalingLastScaledAt,
+			&service.Status,
 			&service.CreatedAt,
 			&service.UpdatedAt,
 		); err != nil {
@@ -325,6 +331,74 @@ func (p *Postgres) UpdateDesiredReplicas(
 			"update desired replicas: %w",
 			err,
 		)
+	}
+
+	return nil
+}
+
+func (p *Postgres) MarkServiceDeleting(
+	ctx context.Context,
+	serviceID string,
+) error {
+	result, err := p.db.ExecContext(
+		ctx,
+		`
+		UPDATE services
+		SET status = 'DELETING',
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND status = 'ACTIVE'
+		`,
+		serviceID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark service deleting: %w", err)
+	}
+
+	if rows, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check service deletion rows: %w", err)
+	} else if rows == 0 {
+		// Treat an already-deleting/deleted service as idempotent.
+		var exists bool
+		err := p.db.QueryRowContext(
+			ctx,
+			`SELECT EXISTS(SELECT 1 FROM services WHERE id = $1)`,
+			serviceID,
+		).Scan(&exists)
+		if err != nil {
+			return fmt.Errorf("check service existence: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("service not found")
+		}
+	}
+
+	return nil
+}
+
+func (p *Postgres) MarkServiceDeleted(
+	ctx context.Context,
+	serviceID string,
+) error {
+	result, err := p.db.ExecContext(
+		ctx,
+		`
+		UPDATE services
+		SET status = 'DELETED',
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND status = 'DELETING'
+		`,
+		serviceID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark service deleted: %w", err)
+	}
+
+	if rows, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check service deleted rows: %w", err)
+	} else if rows == 0 {
+		return fmt.Errorf("service is not deleting")
 	}
 
 	return nil

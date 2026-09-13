@@ -30,7 +30,6 @@ type registrationRequest struct {
 	MemoryCapacity int    `json:"memory_capacity_mb"`
 }
 
-
 func (a *Agent) Register(ctx context.Context) error {
 	payload := registrationRequest{
 		ID:             a.ID,
