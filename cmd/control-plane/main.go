@@ -8,14 +8,13 @@ import (
 	"time"
 
 	"mini-orchestrator/internal/api"
-	"mini-orchestrator/internal/node"
-	"mini-orchestrator/internal/store"
+	"mini-orchestrator/internal/autoscaler"
 	"mini-orchestrator/internal/controller"
+	"mini-orchestrator/internal/metrics"
+	"mini-orchestrator/internal/node"
 	"mini-orchestrator/internal/reconciler"
 	"mini-orchestrator/internal/scheduler"
-	"mini-orchestrator/internal/autoscaler"
-	"mini-orchestrator/internal/metrics"
-
+	"mini-orchestrator/internal/store"
 )
 
 func main() {
@@ -60,7 +59,7 @@ func main() {
 	)
 	replicaController := controller.NewReplicaController(db)
 	deploymentController := controller.NewDeploymentController(db)
-	deploymentStatus := controller.NewDeploymentStatusController(db,2*time.Minute,)
+	deploymentStatus := controller.NewDeploymentStatusController(db, 2*time.Minute)
 
 	reconciler := reconciler.New(
 		db,
@@ -90,7 +89,7 @@ func main() {
 
 	go autoscalerLoop.Run(ctx)
 	go reconciler.Run(ctx)
-	
+
 	server := api.NewServer(db)
 
 	httpServer := &http.Server{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"mini-orchestrator/internal/metrics"
 	"mini-orchestrator/internal/model"
@@ -13,6 +14,8 @@ import (
 type Autoscaler struct {
 	store   *store.Postgres
 	metrics metrics.Provider
+
+	observations map[string]observation
 }
 
 func New(
@@ -20,8 +23,9 @@ func New(
 	metricsProvider metrics.Provider,
 ) *Autoscaler {
 	return &Autoscaler{
-		store:   store,
-		metrics: metricsProvider,
+		store:        store,
+		metrics:      metricsProvider,
+		observations: make(map[string]observation),
 	}
 }
 
@@ -29,7 +33,17 @@ func (a *Autoscaler) ReconcileService(
 	ctx context.Context,
 	service model.Service,
 ) error {
+	if service.Status != model.ServiceActive {
+		return nil
+	}
+	a.cleanupObservations(time.Now())
+
 	config := service.Autoscaling
+
+	if service.DeploymentStatus ==
+		model.DeploymentProgressing {
+		return nil
+	}
 
 	if !config.Enabled {
 		return nil
@@ -103,9 +117,48 @@ func (a *Autoscaler) ReconcileService(
 		return nil
 	}
 
+	now := time.Now()
+
+	desired = limitScaleStep(
+		service.DesiredReplicas,
+		desired,
+		config.MaxScaleStep,
+	)
+
+	if desired == service.DesiredReplicas {
+		return nil
+	}
+
+	if cooldownActive(
+		service,
+		desired,
+		now,
+	) {
+		return nil
+	}
+
+	if !stableObservation(
+		a.observations,
+		service.ID,
+		desired,
+		config.RequiredObservations,
+		now,
+	) {
+		return nil
+	}
 	return a.store.UpdateDesiredReplicas(
 		ctx,
 		service.ID,
 		desired,
 	)
+}
+
+func (a *Autoscaler) cleanupObservations(
+	now time.Time,
+) {
+	for serviceID, observation := range a.observations {
+		if now.Sub(observation.lastSeen) > 10*time.Minute {
+			delete(a.observations, serviceID)
+		}
+	}
 }

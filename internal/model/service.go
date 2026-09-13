@@ -6,9 +6,9 @@ type DeploymentStatus string
 
 const (
 	DeploymentPending     DeploymentStatus = "PENDING"
-	DeploymentProgressing  DeploymentStatus = "PROGRESSING"
-	DeploymentAvailable    DeploymentStatus = "AVAILABLE"
-	DeploymentFailed       DeploymentStatus = "FAILED"
+	DeploymentProgressing DeploymentStatus = "PROGRESSING"
+	DeploymentAvailable   DeploymentStatus = "AVAILABLE"
+	DeploymentFailed      DeploymentStatus = "FAILED"
 )
 
 type Service struct {
@@ -26,10 +26,11 @@ type Service struct {
 	DeploymentStatus    DeploymentStatus
 	DeploymentStartedAt *time.Time
 
-	Autoscaling AutoscalingConfig
-
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Autoscaling             AutoscalingConfig
+	AutoscalingLastScaledAt *time.Time
+	Status                  ServiceStatus
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 type AutoscalingConfig struct {
@@ -37,4 +38,17 @@ type AutoscalingConfig struct {
 	MinReplicas int
 	MaxReplicas int
 	TargetCPU   float64
+
+	ScaleUpCooldownSeconds   int
+	ScaleDownCooldownSeconds int
+	RequiredObservations     int
+	MaxScaleStep             int
 }
+
+type ServiceStatus string
+
+const (
+	ServiceActive   ServiceStatus = "ACTIVE"
+	ServiceDeleting ServiceStatus = "DELETING"
+	ServiceDeleted  ServiceStatus = "DELETED"
+)

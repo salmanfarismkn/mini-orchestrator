@@ -12,8 +12,8 @@ import (
 )
 
 type WorkloadExecutor struct {
-	store       *store.Postgres
-	nodeClient  *node.Client
+	store      *store.Postgres
+	nodeClient *node.Client
 }
 
 func NewWorkloadExecutor(

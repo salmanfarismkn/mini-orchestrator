@@ -20,6 +20,7 @@ type Reconciler struct {
 	executor             *WorkloadExecutor
 	runtimeReconciler    *RuntimeReconciler
 	interval             time.Duration
+	deletionController   *controller.DeletionController
 }
 
 func New(
@@ -41,6 +42,7 @@ func New(
 		executor:             executor,
 		runtimeReconciler:    runtimeReconciler,
 		interval:             interval,
+		deletionController:   controller.NewDeletionController(store),
 	}
 }
 
@@ -67,110 +69,71 @@ func (r *Reconciler) Run(ctx context.Context) {
 }
 
 func (r *Reconciler) reconcile(ctx context.Context) {
-    services, err := r.listServices(ctx)
-    if err != nil {
-        slog.Error("reconciliation failed to list services", "error", err)
-        return
-    }
+	services, err := r.listServices(ctx)
+	if err != nil {
+		slog.Error("reconciliation failed to list services", "error", err)
+		return
+	}
 
-    nodes, err := r.store.ListNodes(ctx)
-    if err != nil {
-        slog.Error("failed to list nodes", "error", err)
-        return
-    }
+	nodes, err := r.store.ListNodes(ctx)
+	if err != nil {
+		slog.Error("failed to list nodes", "error", err)
+		return
+	}
 
-    for _, node := range nodes {
-        if node.Status == model.NodeUnhealthy {
-            if err := r.store.RecoverWorkloadsFromNode(ctx, node.ID); err != nil {
-                slog.Error(
-                    "failed to recover workloads from node",
-                    "node_id", node.ID,
-                    "error", err,
-                )
-            }
-            continue
-        }
+	for _, node := range nodes {
+		if node.Status == model.NodeUnhealthy {
+			if err := r.store.RecoverWorkloadsFromNode(ctx, node.ID); err != nil {
+				slog.Error("failed to recover workloads from node",
+					"node_id", node.ID, "error", err)
+			}
+			continue
+		}
+		if node.Status != model.NodeReady {
+			continue
+		}
+		if err := r.runtimeReconciler.ReconcileNode(ctx, node); err != nil {
+			slog.Error("runtime reconciliation failed",
+				"node_id", node.ID, "error", err)
+		}
+	}
 
-        if node.Status != model.NodeReady {
-            continue
-        }
-
-        if err := r.runtimeReconciler.ReconcileNode(ctx, node); err != nil {
-            slog.Error(
-                "runtime reconciliation failed",
-                "node_id", node.ID,
-                "error", err,
-            )
-        }
-    }
-
-    for _, service := range services {
-        if err := r.replicaController.ReconcileService(ctx, service); err != nil {
-            slog.Error(
-                "replica reconciliation failed",
-                "service_id", service.ID,
-                "error", err,
-            )
-            continue
-        }
-
-        if err := r.schedulePendingWorkloads(ctx, service); err != nil {
-            slog.Error(
-                "workload scheduling failed",
-                "service_id", service.ID,
-                "error", err,
-            )
-        }
-    }
 	for _, service := range services {
-		if err := r.deploymentController.ReconcileService(
-			ctx,
-			service,
-		); err != nil {
-			slog.Error(
-				"deployment reconciliation failed",
-				"service_id", service.ID,
-				"error", err,
-			)
+		if service.Status == model.ServiceDeleting {
+			if err := r.deletionController.ReconcileService(ctx, service); err != nil {
+				slog.Error("service deletion reconciliation failed",
+					"service_id", service.ID, "error", err)
+			}
 			continue
 		}
 
-		if err := r.replicaController.ReconcileService(
-			ctx,
-			service,
-		); err != nil {
-			slog.Error(
-				"replica reconciliation failed",
-				"service_id", service.ID,
-				"error", err,
-			)
+		if service.Status != model.ServiceActive {
 			continue
 		}
 
-		if err := r.schedulePendingWorkloads(
-			ctx,
-			service,
-		); err != nil {
-			slog.Error(
-				"workload scheduling failed",
-				"service_id", service.ID,
-				"error", err,
-			)
+		if err := r.deploymentController.ReconcileService(ctx, service); err != nil {
+			slog.Error("deployment reconciliation failed",
+				"service_id", service.ID, "error", err)
+			continue
 		}
-		
-		if err := r.deploymentStatus.ReconcileService(
-			ctx,
-			service,
-		); err != nil {
-			slog.Error(
-				"deployment status reconciliation failed",
-				"service_id", service.ID,
-				"error", err,
-			)
+
+		if err := r.replicaController.ReconcileService(ctx, service); err != nil {
+			slog.Error("replica reconciliation failed",
+				"service_id", service.ID, "error", err)
+			continue
+		}
+
+		if err := r.schedulePendingWorkloads(ctx, service); err != nil {
+			slog.Error("workload scheduling failed",
+				"service_id", service.ID, "error", err)
+		}
+
+		if err := r.deploymentStatus.ReconcileService(ctx, service); err != nil {
+			slog.Error("deployment status reconciliation failed",
+				"service_id", service.ID, "error", err)
 		}
 	}
 }
-
 
 func (r *Reconciler) schedulePendingWorkloads(
 	ctx context.Context,

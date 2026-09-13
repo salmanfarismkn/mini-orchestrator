@@ -15,5 +15,25 @@ func (s *Server) Routes() http.Handler {
 		s.heartbeat,
 	)
 
+	mux.HandleFunc(
+		"POST /services",
+		s.createService,
+	)
+
+	mux.HandleFunc(
+		"GET /services/{id}",
+		s.getService,
+	)
+
+	mux.HandleFunc(
+		"PUT /services/{id}",
+		s.updateService,
+	)
+
+	mux.HandleFunc(
+		"DELETE /services/{id}",
+		s.deleteService,
+	)
+
 	return mux
 }

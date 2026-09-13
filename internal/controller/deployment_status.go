@@ -10,8 +10,8 @@ import (
 )
 
 type DeploymentStatusController struct {
-	store       *store.Postgres
-	timeout     time.Duration
+	store   *store.Postgres
+	timeout time.Duration
 }
 
 func NewDeploymentStatusController(

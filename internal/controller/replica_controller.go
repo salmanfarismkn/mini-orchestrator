@@ -21,78 +21,82 @@ func NewReplicaController(store *store.Postgres) *ReplicaController {
 }
 
 func (c *ReplicaController) ReconcileService(
-    ctx context.Context,
-    service model.Service,
+	ctx context.Context,
+	service model.Service,
 ) error {
-    workloads, err := c.store.ListWorkloadsByService(ctx, service.ID)
-    if err != nil {
-        return fmt.Errorf("list workloads for service %q: %w", service.ID, err)
-    }
+	if service.Status != model.ServiceActive {
+		return nil
+	}
 
-    activeReplicas := countActiveReplicas(workloads, service.DeploymentVersion)
+	workloads, err := c.store.ListWorkloadsByService(ctx, service.ID)
+	if err != nil {
+		return fmt.Errorf("list workloads for service %q: %w", service.ID, err)
+	}
 
-    // Deployment-in-progress check
-    if hasOldActiveWorkloads(workloads, service.DeploymentVersion) {
-        return nil
-    }
+	activeReplicas := countActiveReplicas(workloads, service.DeploymentVersion)
 
-    // Scale up
-    if activeReplicas < service.DesiredReplicas {
-        missing := service.DesiredReplicas - activeReplicas
+	// Deployment-in-progress check
+	if hasOldActiveWorkloads(workloads, service.DeploymentVersion) {
+		return nil
+	}
 
-        for i := 0; i < missing; i++ {
-            workload := model.Workload{
-                ID:                newWorkloadID(),
-                ServiceID:         service.ID,
-                Image:             service.Image,
-                CPURequestMillis:  service.CPURequestMillis,
-                MemoryRequestMB:   service.MemoryRequestMB,
-                DeploymentVersion: service.DeploymentVersion,
-                DesiredState:      model.WorkloadPending,
-                ActualState:       model.WorkloadPending,
-            }
+	// Scale up
+	if activeReplicas < service.DesiredReplicas {
+		missing := service.DesiredReplicas - activeReplicas
 
-            if err := c.store.CreatePendingWorkload(ctx, workload); err != nil {
-                return fmt.Errorf("create pending workload: %w", err)
-            }
-        }
-        return nil
-    }
+		for i := 0; i < missing; i++ {
+			workload := model.Workload{
+				ID:                newWorkloadID(),
+				ServiceID:         service.ID,
+				Image:             service.Image,
+				CPURequestMillis:  service.CPURequestMillis,
+				MemoryRequestMB:   service.MemoryRequestMB,
+				DeploymentVersion: service.DeploymentVersion,
+				DesiredState:      model.WorkloadPending,
+				ActualState:       model.WorkloadPending,
+			}
 
-    // Desired count already satisfied
-    if activeReplicas == service.DesiredReplicas {
-        return nil
-    }
+			if err := c.store.CreatePendingWorkload(ctx, workload); err != nil {
+				return fmt.Errorf("create pending workload: %w", err)
+			}
+		}
+		return nil
+	}
 
-    // Scale down
-    excess := activeReplicas - service.DesiredReplicas
-    candidates := selectScaleDownCandidates(workloads, excess)
+	// Desired count already satisfied
+	if activeReplicas == service.DesiredReplicas {
+		return nil
+	}
 
-    // Count how many new workloads are already running
-    newRunning := 0
-    for _, w := range workloads {
-        if w.DeploymentVersion == service.DeploymentVersion &&
-            w.ActualState == model.WorkloadRunning {
-            newRunning++
-        }
-    }
+	// Scale down
+	excess := activeReplicas - service.DesiredReplicas
+	candidates := selectScaleDownCandidates(workloads, excess)
 
-    // Enforce maxUnavailable = 0
-    if newRunning == 0 {
-        return nil
-    }
+	// Count how many new workloads are already running
+	newRunning := 0
+	for _, w := range workloads {
+		if w.DeploymentVersion == service.DeploymentVersion &&
+			w.ActualState == model.WorkloadRunning {
+			newRunning++
+		}
+	}
 
-    for _, workload := range candidates {
-        if err := c.store.UpdateWorkloadDesiredState(
-            ctx,
-            workload.ID,
-            model.WorkloadStopped,
-        ); err != nil {
-            return fmt.Errorf("mark workload %q for shutdown: %w", workload.ID, err)
-        }
-    }
+	// Enforce maxUnavailable = 0
+	if newRunning == 0 {
+		return nil
+	}
 
-    return nil
+	for _, workload := range candidates {
+		if err := c.store.UpdateWorkloadDesiredState(
+			ctx,
+			workload.ID,
+			model.WorkloadStopped,
+		); err != nil {
+			return fmt.Errorf("mark workload %q for shutdown: %w", workload.ID, err)
+		}
+	}
+
+	return nil
 }
 
 func countActiveReplicas(
