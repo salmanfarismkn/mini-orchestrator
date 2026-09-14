@@ -20,7 +20,9 @@ func validateServiceRequest(
 		return fmt.Errorf("image is required")
 	}
 
-	if req.Replicas < 0 {
+	replicas := req.effectiveReplicas()
+
+	if replicas < 0 {
 		return fmt.Errorf("replicas cannot be negative")
 	}
 
@@ -48,7 +50,7 @@ func validateServiceRequest(
 
 	if req.MaxSurge == 0 &&
 		req.MaxUnavailable == 0 &&
-		req.Replicas > 0 {
+		replicas > 0 {
 		return fmt.Errorf(
 			"max_surge and max_unavailable cannot both be zero",
 		)
