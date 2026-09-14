@@ -1,12 +1,12 @@
 package api
 
 import (
-    "encoding/json"
-    "testing"
+	"encoding/json"
+	"testing"
 )
 
 func TestCreateServiceRequestCompatibility(t *testing.T) {
-    payload := []byte(`{
+	payload := []byte(`{
         "id": "my-service",
         "name": "my-service",
         "image": "nginx:alpine",
@@ -27,16 +27,16 @@ func TestCreateServiceRequestCompatibility(t *testing.T) {
         "autoscaling_max_scale_step": 2
     }`)
 
-    var req createServiceRequest
-    if err := json.Unmarshal(payload, &req); err != nil {
-        t.Fatalf("decode service request: %v", err)
-    }
+	var req createServiceRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("decode service request: %v", err)
+	}
 
-    if req.effectiveReplicas() != 2 {
-        t.Fatalf("effectiveReplicas() = %d; want 2", req.effectiveReplicas())
-    }
+	if req.effectiveReplicas() != 2 {
+		t.Fatalf("effectiveReplicas() = %d; want 2", req.effectiveReplicas())
+	}
 
-    if req.Autoscaling == nil && req.AutoscalingEnabled {
-        t.Fatal("expected autoscaling compatibility fields to populate the autoscaling request")
-    }
+	if req.Autoscaling == nil && req.AutoscalingEnabled {
+		t.Fatal("expected autoscaling compatibility fields to populate the autoscaling request")
+	}
 }

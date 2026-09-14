@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -30,6 +32,43 @@ type updateServiceRequest struct {
 
 	MaxSurge       int `json:"max_surge"`
 	MaxUnavailable int `json:"max_unavailable"`
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	_ = json.NewEncoder(w).Encode(errorResponse{
+		Error: message,
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("request body must contain a single JSON object")
+	}
+
+	return nil
 }
 
 type registerNodeRequest struct {
@@ -143,12 +182,12 @@ func (s *Server) heartbeat(
 	var req heartbeatRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if req.ID == "" {
-		http.Error(w, "node id is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "node id is required")
 		return
 	}
 
@@ -186,10 +225,14 @@ func (s *Server) registerNode(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req registerNodeRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -197,7 +240,7 @@ func (s *Server) registerNode(
 		req.Address == "" ||
 		req.CPUCapacity <= 0 ||
 		req.MemoryCapacity <= 0 {
-		http.Error(w, "invalid node registration", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid node registration")
 		return
 	}
 
@@ -213,11 +256,7 @@ func (s *Server) registerNode(
 	}
 
 	if err := s.store.RegisterNode(r.Context(), node); err != nil {
-		http.Error(
-			w,
-			"failed to register node",
-			http.StatusInternalServerError,
-		)
+		writeError(w, http.StatusInternalServerError, "failed to register node")
 		return
 	}
 
@@ -234,28 +273,32 @@ func (s *Server) createService(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req createServiceRequest
 
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(
-			w,
-			"invalid JSON",
-			http.StatusBadRequest,
-		)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
 	req.normalize()
 
 	if err := validateServiceRequest(req); err != nil {
-		http.Error(
-			w,
-			err.Error(),
-			http.StatusBadRequest,
-		)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	_, err := s.store.GetService(r.Context(), req.ID)
+
+	if err == nil {
+		writeError(w, http.StatusConflict, "service already exists")
+		return
+	}
 	now := time.Now().UTC()
 
 	autoscaling := model.AutoscalingConfig{}
@@ -303,11 +346,7 @@ func (s *Server) createService(
 			"error", err,
 		)
 
-		http.Error(
-			w,
-			"failed to create service",
-			http.StatusInternalServerError,
-		)
+		writeError(w, http.StatusInternalServerError, "failed to create service")
 		return
 	}
 
@@ -332,11 +371,7 @@ func (s *Server) getService(
 		id,
 	)
 	if err != nil {
-		http.Error(
-			w,
-			"service not found",
-			http.StatusNotFound,
-		)
+		writeError(w, http.StatusNotFound, "service not found")
 		return
 	}
 
@@ -352,27 +387,21 @@ func (s *Server) updateService(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	id := r.PathValue("id")
 
 	var req updateServiceRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(
-			w,
-			"invalid JSON",
-			http.StatusBadRequest,
-		)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
 	if req.Replicas < 0 ||
 		req.CPURequestMillis <= 0 ||
 		req.MemoryRequestMB <= 0 {
-		http.Error(
-			w,
-			"invalid service configuration",
-			http.StatusBadRequest,
-		)
+		writeError(w, http.StatusBadRequest, "invalid service configuration")
 		return
 	}
 
@@ -381,11 +410,7 @@ func (s *Server) updateService(
 		id,
 	)
 	if err != nil {
-		http.Error(
-			w,
-			"service not found",
-			http.StatusNotFound,
-		)
+		writeError(w, http.StatusNotFound, "service not found")
 		return
 	}
 
@@ -407,11 +432,7 @@ func (s *Server) updateService(
 			"error", err,
 		)
 
-		http.Error(
-			w,
-			"failed to update service",
-			http.StatusInternalServerError,
-		)
+		writeError(w, http.StatusInternalServerError, "failed to update service")
 		return
 	}
 
@@ -420,11 +441,7 @@ func (s *Server) updateService(
 		id,
 	)
 	if err != nil {
-		http.Error(
-			w,
-			"failed to read updated service",
-			http.StatusInternalServerError,
-		)
+		writeError(w, http.StatusInternalServerError, "failed to read updated service")
 		return
 	}
 
@@ -440,13 +457,13 @@ func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	if id == "" {
-		http.Error(w, "service id is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "service id is required")
 		return
 	}
 
 	service, err := s.store.GetService(r.Context(), id)
 	if err != nil {
-		http.Error(w, "service not found", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "service not found")
 		return
 	}
 
@@ -456,7 +473,7 @@ func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.MarkServiceDeleting(r.Context(), id); err != nil {
-		http.Error(w, "failed to delete service", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to delete service")
 		return
 	}
 
