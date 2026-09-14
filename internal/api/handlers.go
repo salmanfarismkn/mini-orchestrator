@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"mini-orchestrator/internal/model"
@@ -49,17 +50,79 @@ type heartbeatResponse struct {
 }
 
 type createServiceRequest struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	Image            string `json:"image"`
-	Replicas         int    `json:"replicas"`
-	CPURequestMillis int    `json:"cpu_request_millis"`
-	MemoryRequestMB  int    `json:"memory_request_mb"`
+	ID                string              `json:"id"`
+	Name              string              `json:"name"`
+	Image             string              `json:"image"`
+	Replicas          int                 `json:"replicas"`
+	DesiredReplicas   int                 `json:"desired_replicas"`
+	CPURequestMillis  int                 `json:"cpu_request_millis"`
+	MemoryRequestMB   int                 `json:"memory_request_mb"`
+	DeploymentVersion int                 `json:"deployment_version"`
+	DeploymentStatus  string              `json:"deployment_status"`
+	MaxSurge          int                 `json:"max_surge"`
+	MaxUnavailable    int                 `json:"max_unavailable"`
+	Status            string              `json:"status"`
+	Autoscaling       *autoscalingRequest `json:"autoscaling"`
 
-	MaxSurge       int `json:"max_surge"`
-	MaxUnavailable int `json:"max_unavailable"`
+	AutoscalingEnabled                  bool    `json:"autoscaling_enabled"`
+	AutoscalingMinReplicas              int     `json:"autoscaling_min_replicas"`
+	AutoscalingMaxReplicas              int     `json:"autoscaling_max_replicas"`
+	AutoscalingTargetCPU                float64 `json:"autoscaling_target_cpu"`
+	AutoscalingScaleUpCooldownSeconds   int     `json:"autoscaling_scale_up_cooldown_seconds"`
+	AutoscalingScaleDownCooldownSeconds int     `json:"autoscaling_scale_down_cooldown_seconds"`
+	AutoscalingRequiredObservations     int     `json:"autoscaling_required_observations"`
+	AutoscalingMaxScaleStep             int     `json:"autoscaling_max_scale_step"`
+}
 
-	Autoscaling *autoscalingRequest `json:"autoscaling"`
+func (r *createServiceRequest) normalize() {
+	if r.Replicas == 0 && r.DesiredReplicas > 0 {
+		r.Replicas = r.DesiredReplicas
+	}
+
+	if r.Autoscaling == nil && (r.AutoscalingEnabled ||
+		r.AutoscalingMinReplicas > 0 ||
+		r.AutoscalingMaxReplicas > 0 ||
+		r.AutoscalingTargetCPU > 0 ||
+		r.AutoscalingScaleUpCooldownSeconds > 0 ||
+		r.AutoscalingScaleDownCooldownSeconds > 0 ||
+		r.AutoscalingRequiredObservations > 0 ||
+		r.AutoscalingMaxScaleStep > 0) {
+		r.Autoscaling = &autoscalingRequest{
+			Enabled:                  r.AutoscalingEnabled,
+			MinReplicas:              r.AutoscalingMinReplicas,
+			MaxReplicas:              r.AutoscalingMaxReplicas,
+			TargetCPU:                r.AutoscalingTargetCPU,
+			ScaleUpCooldownSeconds:   r.AutoscalingScaleUpCooldownSeconds,
+			ScaleDownCooldownSeconds: r.AutoscalingScaleDownCooldownSeconds,
+			RequiredObservations:     r.AutoscalingRequiredObservations,
+			MaxScaleStep:             r.AutoscalingMaxScaleStep,
+		}
+	}
+
+	if r.DeploymentVersion == 0 {
+		r.DeploymentVersion = 1
+	}
+}
+
+func (r createServiceRequest) effectiveReplicas() int {
+	if r.Replicas > 0 {
+		return r.Replicas
+	}
+	return r.DesiredReplicas
+}
+
+func (r createServiceRequest) effectiveDeploymentStatus() model.DeploymentStatus {
+	if r.DeploymentStatus == "" {
+		return model.DeploymentAvailable
+	}
+	return model.DeploymentStatus(strings.ToUpper(r.DeploymentStatus))
+}
+
+func (r createServiceRequest) effectiveServiceStatus() model.ServiceStatus {
+	if r.Status == "" {
+		return model.ServiceActive
+	}
+	return model.ServiceStatus(strings.ToUpper(r.Status))
 }
 
 type autoscalingRequest struct {
@@ -182,6 +245,8 @@ func (s *Server) createService(
 		return
 	}
 
+	req.normalize()
+
 	if err := validateServiceRequest(req); err != nil {
 		http.Error(
 			w,
@@ -212,15 +277,16 @@ func (s *Server) createService(
 		ID:                req.ID,
 		Name:              req.Name,
 		Image:             req.Image,
-		DesiredReplicas:   req.Replicas,
+		DesiredReplicas:   req.effectiveReplicas(),
 		CPURequestMillis:  req.CPURequestMillis,
 		MemoryRequestMB:   req.MemoryRequestMB,
-		DeploymentVersion: 1,
+		DeploymentVersion: req.DeploymentVersion,
 
 		MaxSurge:       req.MaxSurge,
 		MaxUnavailable: req.MaxUnavailable,
 
-		DeploymentStatus: model.DeploymentAvailable,
+		DeploymentStatus: req.effectiveDeploymentStatus(),
+		Status:           req.effectiveServiceStatus(),
 
 		Autoscaling: autoscaling,
 
