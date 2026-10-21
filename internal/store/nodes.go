@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -64,7 +65,10 @@ func (p *Postgres) GetNode(ctx context.Context, id string) (model.Node, error) {
 		WHERE id = $1
 	`
 
-	var node model.Node
+	var (
+		node          model.Node
+		lastHeartbeat sql.NullTime
+	)
 
 	err := p.db.QueryRowContext(ctx, query, id).Scan(
 		&node.ID,
@@ -74,10 +78,14 @@ func (p *Postgres) GetNode(ctx context.Context, id string) (model.Node, error) {
 		&node.CPUAllocated,
 		&node.MemoryAllocated,
 		&node.Status,
-		&node.LastHeartbeat,
+		&lastHeartbeat,
 		&node.CreatedAt,
 		&node.UpdatedAt,
 	)
+
+	if lastHeartbeat.Valid {
+		node.LastHeartbeat = lastHeartbeat.Time
+	}
 
 	if err != nil {
 		return model.Node{}, fmt.Errorf("get node %q: %w", id, err)
@@ -112,7 +120,10 @@ func (p *Postgres) ListNodes(ctx context.Context) ([]model.Node, error) {
 	var nodes []model.Node
 
 	for rows.Next() {
-		var node model.Node
+		var (
+			node          model.Node
+			lastHeartbeat sql.NullTime
+		)
 
 		if err := rows.Scan(
 			&node.ID,
@@ -122,11 +133,15 @@ func (p *Postgres) ListNodes(ctx context.Context) ([]model.Node, error) {
 			&node.CPUAllocated,
 			&node.MemoryAllocated,
 			&node.Status,
-			&node.LastHeartbeat,
+			&lastHeartbeat,
 			&node.CreatedAt,
 			&node.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
+		}
+
+		if lastHeartbeat.Valid {
+			node.LastHeartbeat = lastHeartbeat.Time
 		}
 
 		nodes = append(nodes, node)

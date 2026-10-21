@@ -2,8 +2,8 @@ package store
 
 import (
 	"context"
-	"fmt"
 	"database/sql"
+	"fmt"
 
 	"mini-orchestrator/internal/model"
 )
@@ -433,23 +433,23 @@ func (p *Postgres) UpdateWorkloadActualState(
 }
 
 func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
-    ctx context.Context,
-    workloadID string,
+	ctx context.Context,
+	workloadID string,
 ) error {
-    tx, err := p.db.BeginTx(ctx, nil)
-    if err != nil {
-        return fmt.Errorf("begin failure transaction: %w", err)
-    }
-    defer tx.Rollback()
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin failure transaction: %w", err)
+	}
+	defer tx.Rollback()
 
-    var (
-        nodeID        *string
-        cpuRequest    int
-        memoryRequest int
-        actualState   model.WorkloadState
-    )
+	var (
+		nodeID        *string
+		cpuRequest    int
+		memoryRequest int
+		actualState   model.WorkloadState
+	)
 
-    err = tx.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
         SELECT
             node_id,
             cpu_request_millis,
@@ -459,23 +459,23 @@ func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
         WHERE id = $1
         FOR UPDATE
     `, workloadID).Scan(
-        &nodeID,
-        &cpuRequest,
-        &memoryRequest,
-        &actualState,
-    )
+		&nodeID,
+		&cpuRequest,
+		&memoryRequest,
+		&actualState,
+	)
 
-    if err != nil {
-        return fmt.Errorf("get workload for failure: %w", err)
-    }
+	if err != nil {
+		return fmt.Errorf("get workload for failure: %w", err)
+	}
 
-    // Already failed; nothing more to release.
-    if actualState == model.WorkloadFailed {
-        return nil
-    }
+	// Already failed; nothing more to release.
+	if actualState == model.WorkloadFailed {
+		return nil
+	}
 
-    if nodeID != nil {
-        result, err := tx.ExecContext(ctx, `
+	if nodeID != nil {
+		result, err := tx.ExecContext(ctx, `
             UPDATE nodes
             SET
                 cpu_allocated_millis =
@@ -487,50 +487,49 @@ func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
               AND cpu_allocated_millis >= $1
               AND memory_allocated_mb >= $2
         `,
-            cpuRequest,
-            memoryRequest,
-            *nodeID,
-        )
+			cpuRequest,
+			memoryRequest,
+			*nodeID,
+		)
 
-        if err != nil {
-            return fmt.Errorf("release node resources: %w", err)
-        }
+		if err != nil {
+			return fmt.Errorf("release node resources: %w", err)
+		}
 
-        rows, err := result.RowsAffected()
-        if err != nil {
-            return fmt.Errorf("check resource release: %w", err)
-        }
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("check resource release: %w", err)
+		}
 
-        if rows == 0 {
-            return fmt.Errorf(
-                "could not release resources for node %q",
-                *nodeID,
-            )
-        }
-    }
+		if rows == 0 {
+			return fmt.Errorf(
+				"could not release resources for node %q",
+				*nodeID,
+			)
+		}
+	}
 
-    _, err = tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
         UPDATE workloads
         SET
             actual_state = $1,
             updated_at = NOW()
         WHERE id = $2
     `,
-        model.WorkloadFailed,
-        workloadID,
-    )
+		model.WorkloadFailed,
+		workloadID,
+	)
 
-    if err != nil {
-        return fmt.Errorf("mark workload failed: %w", err)
-    }
+	if err != nil {
+		return fmt.Errorf("mark workload failed: %w", err)
+	}
 
-    if err := tx.Commit(); err != nil {
-        return fmt.Errorf("commit workload failure: %w", err)
-    }
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit workload failure: %w", err)
+	}
 
-    return nil
+	return nil
 }
-
 
 func (p *Postgres) RecoverWorkloadsFromNode(
 	ctx context.Context,
