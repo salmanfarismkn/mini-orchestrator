@@ -24,24 +24,28 @@ func main() {
 		log.Fatal("DATABASE_URL is required")
 	}
 
-	ctx, cancel := context.WithTimeout(
+	dbCtx, cancelDB := context.WithTimeout(
 		context.Background(),
 		5*time.Second,
 	)
-	defer cancel()
 
-	db, err := store.NewPostgres(ctx, dsn)
+	db, err := store.NewPostgres(dbCtx, dsn)
+	cancelDB()
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	}
 	defer db.Close()
+
+	appCtx, cancelApp := context.WithCancel(context.Background())
+	defer cancelApp()
+
 	healthChecker := node.NewHealthChecker(
 		db,
 		5*time.Second,
 		15*time.Second,
 	)
 
-	go healthChecker.Run(context.Background())
+	go healthChecker.Run(appCtx)
 	schedulerEngine := scheduler.New()
 
 	schedulerService := scheduler.NewService(
@@ -87,8 +91,8 @@ func main() {
 		30*time.Second,
 	)
 
-	go autoscalerLoop.Run(ctx)
-	go reconciler.Run(ctx)
+	go autoscalerLoop.Run(appCtx)
+	go reconciler.Run(appCtx)
 
 	server := api.NewServer(db)
 
