@@ -86,6 +86,7 @@ func (p *Postgres) GetWorkload(
 		&workload.Image,
 		&workload.CPURequestMillis,
 		&workload.MemoryRequestMB,
+		&workload.DeploymentVersion,
 		&workload.DesiredState,
 		&workload.ActualState,
 		&workload.CreatedAt,
