@@ -14,12 +14,17 @@ import (
 )
 
 type Server struct {
-	store *store.Postgres
+	store     *store.Postgres
+	nodeToken string
 }
 
-func NewServer(store *store.Postgres) *Server {
+func NewServer(
+	store *store.Postgres,
+	nodeToken string,
+) *Server {
 	return &Server{
-		store: store,
+		store:     store,
+		nodeToken: nodeToken,
 	}
 }
 

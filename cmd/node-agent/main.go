@@ -4,8 +4,12 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/joho/godotenv"
+
+	"mini-orchestrator/internal/api"
 	"mini-orchestrator/internal/node"
 	"mini-orchestrator/internal/runtime"
 )
@@ -21,6 +25,16 @@ func (a *runtimeAdapter) Stats(ctx context.Context, containerID string) (runtime
 }
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("warning: .env file not found")
+	}
+
+	nodeToken := os.Getenv("ORCHESTRATOR_NODE_TOKEN")
+	if nodeToken == "" {
+		log.Fatal("ORCHESTRATOR_NODE_TOKEN must be configured")
+	}
+
 	dockerRuntime, err := runtime.NewDockerRuntime()
 	if err != nil {
 		log.Fatalf("create docker runtime: %v", err)
@@ -33,6 +47,7 @@ func main() {
 		MemoryCapacity:  8192,
 		ControlPlaneURL: "http://localhost:8080",
 		Runtime:         &runtimeAdapter{DockerRuntime: dockerRuntime},
+		Token:           nodeToken,
 	}
 
 	ctx := context.Background()
@@ -51,10 +66,12 @@ func main() {
 
 	go agent.RunHeartbeatLoop(ctx)
 
+	mux := http.NewServeMux()
+	handler := api.RequireBearerToken(nodeToken, mux)
+
 	server := &http.Server{
-		Addr:              ":9001",
-		Handler:           agent.Routes(),
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:    ":9001",
+		Handler: handler,
 	}
 
 	log.Println("node agent listening on :9001")

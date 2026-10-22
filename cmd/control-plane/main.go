@@ -7,6 +7,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"mini-orchestrator/internal/api"
 	"mini-orchestrator/internal/autoscaler"
 	"mini-orchestrator/internal/controller"
@@ -18,10 +20,20 @@ import (
 )
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("warning: .env file not found")
+	}
+
 	dsn := os.Getenv("DATABASE_URL")
 
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
+	}
+
+	nodeToken := os.Getenv("ORCHESTRATOR_NODE_TOKEN")
+	if nodeToken == "" {
+		log.Fatal("ORCHESTRATOR_NODE_TOKEN must be configured")
 	}
 
 	dbCtx, cancelDB := context.WithTimeout(
@@ -52,7 +64,10 @@ func main() {
 		db,
 		schedulerEngine,
 	)
-	nodeClient := node.NewClient(nil)
+	nodeClient := node.NewClient(
+		nil,
+		nodeToken,
+	)
 	runtimeReconciler := reconciler.NewRuntimeReconciler(
 		db,
 		nodeClient,
@@ -94,7 +109,10 @@ func main() {
 	go autoscalerLoop.Run(appCtx)
 	go reconciler.Run(appCtx)
 
-	server := api.NewServer(db)
+	server := api.NewServer(
+		db,
+		nodeToken,
+	)
 
 	httpServer := &http.Server{
 		Addr:              ":8080",
