@@ -21,6 +21,8 @@ type Agent struct {
 
 	Client  *http.Client
 	Runtime runtime.Runtime
+
+	Token string
 }
 
 type registrationRequest struct {
@@ -52,7 +54,10 @@ func (a *Agent) Register(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create registration request: %w", err)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+a.Token,
+	)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := a.Client
@@ -102,7 +107,10 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create heartbeat request: %w", err)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+a.Token,
+	)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := a.Client

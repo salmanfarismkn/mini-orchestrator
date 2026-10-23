@@ -12,15 +12,20 @@ import (
 
 type Client struct {
 	httpClient *http.Client
+	token      string
 }
 
-func NewClient(httpClient *http.Client) *Client {
+func NewClient(
+	httpClient *http.Client,
+	token string,
+) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
 
 	return &Client{
 		httpClient: httpClient,
+		token:      token,
 	}
 }
 
@@ -62,7 +67,10 @@ func (c *Client) CreateContainer(
 	if err != nil {
 		return runtime.Container{}, fmt.Errorf("create request: %w", err)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+c.token,
+	)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -109,7 +117,10 @@ func (c *Client) StartContainer(
 	if err != nil {
 		return fmt.Errorf("create start request: %w", err)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+c.token,
+	)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("send start request: %w", err)
@@ -139,7 +150,10 @@ func (c *Client) ListContainers(
 	if err != nil {
 		return nil, fmt.Errorf("create list containers request: %w", err)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+c.token,
+	)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("send list containers request: %w", err)
@@ -179,7 +193,10 @@ func (c *Client) StopContainer(
 	if err != nil {
 		return fmt.Errorf("create stop request: %w", err)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+c.token,
+	)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("send stop request: %w", err)
@@ -210,7 +227,10 @@ func (c *Client) DeleteContainer(
 	if err != nil {
 		return fmt.Errorf("create delete request: %w", err)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+c.token,
+	)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("send delete request: %w", err)
@@ -244,7 +264,10 @@ func (c *Client) GetContainer(
 			err,
 		)
 	}
-
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+c.token,
+	)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return runtime.Container{}, fmt.Errorf(
@@ -291,6 +314,11 @@ func (c *Client) GetContainerStats(
 			err,
 		)
 	}
+
+	req.Header.Set(
+		"Authorization",
+		"Bearer "+c.token,
+	)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
