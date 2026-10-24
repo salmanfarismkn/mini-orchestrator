@@ -66,12 +66,9 @@ func main() {
 
 	go agent.RunHeartbeatLoop(ctx)
 
-	mux := http.NewServeMux()
-	handler := api.RequireBearerToken(nodeToken, mux)
-
 	server := &http.Server{
 		Addr:    ":9001",
-		Handler: handler,
+		Handler: api.RequireBearerToken(nodeToken, agent.Routes()),
 	}
 
 	log.Println("node agent listening on :9001")
