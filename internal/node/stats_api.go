@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 )
 
@@ -16,6 +17,7 @@ func (a *Agent) stats(
 		containerID,
 	)
 	if err != nil {
+		slog.Error("container stats failed", "container_id", containerID, "error", err)
 		http.Error(
 			w,
 			err.Error(),

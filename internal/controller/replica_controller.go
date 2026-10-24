@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 
 	"mini-orchestrator/internal/model"
 	"mini-orchestrator/internal/store"
@@ -59,6 +60,13 @@ func (c *ReplicaController) ReconcileService(
 			if err := c.store.CreatePendingWorkload(ctx, workload); err != nil {
 				return fmt.Errorf("create pending workload: %w", err)
 			}
+			slog.Info(
+				"replica created",
+				"workload_id", workload.ID,
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"state", model.WorkloadPending,
+			)
 		}
 		return nil
 	}

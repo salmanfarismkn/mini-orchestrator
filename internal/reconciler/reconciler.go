@@ -7,6 +7,7 @@ import (
 
 	"mini-orchestrator/internal/controller"
 	"mini-orchestrator/internal/model"
+	"mini-orchestrator/internal/observability"
 	"mini-orchestrator/internal/scheduler"
 	"mini-orchestrator/internal/store"
 )
@@ -21,6 +22,7 @@ type Reconciler struct {
 	runtimeReconciler    *RuntimeReconciler
 	interval             time.Duration
 	deletionController   *controller.DeletionController
+	metrics              *observability.Metrics
 }
 
 func New(
@@ -32,6 +34,7 @@ func New(
 	executor *WorkloadExecutor,
 	runtimeReconciler *RuntimeReconciler,
 	interval time.Duration,
+	metrics *observability.Metrics,
 ) *Reconciler {
 	return &Reconciler{
 		store:                store,
@@ -43,6 +46,7 @@ func New(
 		runtimeReconciler:    runtimeReconciler,
 		interval:             interval,
 		deletionController:   controller.NewDeletionController(store),
+		metrics:              metrics,
 	}
 }
 
@@ -54,8 +58,16 @@ func (r *Reconciler) Run(ctx context.Context) {
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 
-	// Reconcile immediately when the control plane starts.
-	r.reconcile(ctx)
+	if err := r.reconcile(ctx); err != nil {
+		r.metrics.ReconcileFailed()
+		slog.Error(
+			"reconciliation cycle failed",
+			"error",
+			err,
+		)
+	} else {
+		r.metrics.ReconcileSucceeded()
+	}
 
 	for {
 		select {
@@ -63,22 +75,31 @@ func (r *Reconciler) Run(ctx context.Context) {
 			return
 
 		case <-ticker.C:
-			r.reconcile(ctx)
+			if err := r.reconcile(ctx); err != nil {
+				r.metrics.ReconcileFailed()
+				slog.Error(
+					"reconciliation cycle failed",
+					"error",
+					err,
+				)
+			} else {
+				r.metrics.ReconcileSucceeded()
+			}
 		}
 	}
 }
 
-func (r *Reconciler) reconcile(ctx context.Context) {
+func (r *Reconciler) reconcile(ctx context.Context) error {
 	services, err := r.listServices(ctx)
 	if err != nil {
 		slog.Error("reconciliation failed to list services", "error", err)
-		return
+		return err
 	}
 
 	nodes, err := r.store.ListNodes(ctx)
 	if err != nil {
 		slog.Error("failed to list nodes", "error", err)
-		return
+		return err
 	}
 
 	for _, node := range nodes {
@@ -113,26 +134,36 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 
 		if err := r.deploymentController.ReconcileService(ctx, service); err != nil {
 			slog.Error("deployment reconciliation failed",
-				"service_id", service.ID, "error", err)
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"error", err)
 			continue
 		}
 
 		if err := r.replicaController.ReconcileService(ctx, service); err != nil {
 			slog.Error("replica reconciliation failed",
-				"service_id", service.ID, "error", err)
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"error", err)
 			continue
 		}
 
 		if err := r.schedulePendingWorkloads(ctx, service); err != nil {
 			slog.Error("workload scheduling failed",
-				"service_id", service.ID, "error", err)
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"error", err)
 		}
 
 		if err := r.deploymentStatus.ReconcileService(ctx, service); err != nil {
 			slog.Error("deployment status reconciliation failed",
-				"service_id", service.ID, "error", err)
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"error", err)
 		}
 	}
+
+	return nil
 }
 
 func (r *Reconciler) schedulePendingWorkloads(
@@ -152,7 +183,9 @@ func (r *Reconciler) schedulePendingWorkloads(
 		if err := r.executeScheduledWorkloads(ctx, service); err != nil {
 			slog.Error(
 				"workload execution failed",
+				"workload_id", workload.ID,
 				"service_id", service.ID,
+				"deployment_version", workload.DeploymentVersion,
 				"error", err,
 			)
 		}
@@ -182,6 +215,8 @@ func (r *Reconciler) executeScheduledWorkloads(
 					slog.Error(
 						"failed to stop pending workload",
 						"workload_id", workload.ID,
+						"service_id", workload.ServiceID,
+						"state", workload.ActualState,
 						"error", err,
 					)
 				}
@@ -201,6 +236,7 @@ func (r *Reconciler) executeScheduledWorkloads(
 			slog.Error(
 				"failed to get workload node",
 				"workload_id", workload.ID,
+				"service_id", workload.ServiceID,
 				"node_id", *workload.NodeID,
 				"error", err,
 			)
@@ -216,7 +252,10 @@ func (r *Reconciler) executeScheduledWorkloads(
 				slog.Error(
 					"failed to stop workload",
 					"workload_id", workload.ID,
+					"service_id", workload.ServiceID,
 					"node_id", node.ID,
+					"container_id", workload.ContainerID,
+					"state", workload.ActualState,
 					"error", err,
 				)
 			}
@@ -232,7 +271,9 @@ func (r *Reconciler) executeScheduledWorkloads(
 			slog.Error(
 				"workload execution failed",
 				"workload_id", workload.ID,
+				"service_id", workload.ServiceID,
 				"node_id", node.ID,
+				"deployment_version", workload.DeploymentVersion,
 				"error", err,
 			)
 		}

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"mini-orchestrator/internal/model"
@@ -69,17 +70,36 @@ func (c *DeploymentStatusController) ReconcileService(
 	// is running on the current version and no old replicas remain.
 	if newRunning == service.DesiredReplicas &&
 		oldRunning == 0 {
-
-		return c.store.UpdateDeploymentStatus(
+		if err := c.store.UpdateDeploymentStatus(
 			ctx,
 			service.ID,
 			model.DeploymentAvailable,
-		)
+		); err != nil {
+			return err
+		}
+		if service.DeploymentStatus != model.DeploymentAvailable {
+			slog.Info(
+				"deployment completed",
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"state", model.DeploymentAvailable,
+			)
+		}
+		return nil
 	}
 
 	// A current-version workload failing means the rollout
 	// cannot currently reach the desired state.
 	if newFailed > 0 {
+		if service.DeploymentStatus != model.DeploymentFailed {
+			slog.Error(
+				"deployment failed",
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"state", model.DeploymentFailed,
+				"error", "current-version workload failed",
+			)
+		}
 		return c.store.UpdateDeploymentStatus(
 			ctx,
 			service.ID,
@@ -90,6 +110,15 @@ func (c *DeploymentStatusController) ReconcileService(
 	// Check for rollout timeout.
 	if service.DeploymentStartedAt != nil &&
 		time.Since(*service.DeploymentStartedAt) > c.timeout {
+		if service.DeploymentStatus != model.DeploymentFailed {
+			slog.Error(
+				"deployment failed",
+				"service_id", service.ID,
+				"deployment_version", service.DeploymentVersion,
+				"state", model.DeploymentFailed,
+				"error", "deployment timed out",
+			)
+		}
 
 		return c.store.UpdateDeploymentStatus(
 			ctx,

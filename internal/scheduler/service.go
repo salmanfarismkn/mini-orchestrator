@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"mini-orchestrator/internal/model"
 	"mini-orchestrator/internal/store"
@@ -29,6 +30,7 @@ func (s *Service) ScheduleWorkload(
 ) error {
 	nodes, err := s.store.ListNodes(ctx)
 	if err != nil {
+		slog.Error("workload scheduling failed", "workload_id", workload.ID, "service_id", workload.ServiceID, "error", err)
 		return fmt.Errorf("list nodes: %w", err)
 	}
 
@@ -37,6 +39,7 @@ func (s *Service) ScheduleWorkload(
 		nodes,
 	)
 	if err != nil {
+		slog.Error("workload scheduling failed", "workload_id", workload.ID, "service_id", workload.ServiceID, "error", err)
 		return err
 	}
 
@@ -47,12 +50,22 @@ func (s *Service) ScheduleWorkload(
 		workload.CPURequestMillis,
 		workload.MemoryRequestMB,
 	); err != nil {
+		slog.Error("workload scheduling failed", "workload_id", workload.ID, "service_id", workload.ServiceID, "node_id", selectedNode.ID, "error", err)
 		return fmt.Errorf(
 			"reserve selected node %q: %w",
 			selectedNode.ID,
 			err,
 		)
 	}
+
+	slog.Info(
+		"workload scheduled",
+		"workload_id", workload.ID,
+		"service_id", workload.ServiceID,
+		"node_id", selectedNode.ID,
+		"deployment_version", workload.DeploymentVersion,
+		"state", model.WorkloadScheduled,
+	)
 
 	return nil
 }

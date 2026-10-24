@@ -64,6 +64,7 @@ func (c *DeploymentController) ReconcileService(
 			"rolling deployment created replacement",
 			"service_id", service.ID,
 			"deployment_version", service.DeploymentVersion,
+			"state", model.WorkloadPending,
 		)
 
 		return nil
@@ -90,6 +91,7 @@ func (c *DeploymentController) ReconcileService(
 		"workload_id", old.ID,
 		"old_version", old.DeploymentVersion,
 		"new_version", service.DeploymentVersion,
+		"state", model.WorkloadStopped,
 	)
 
 	return nil
@@ -169,6 +171,14 @@ func (c *DeploymentController) createReplacementWorkload(
 			err,
 		)
 	}
+
+	slog.Info(
+		"replica created",
+		"workload_id", workload.ID,
+		"service_id", service.ID,
+		"deployment_version", service.DeploymentVersion,
+		"state", model.WorkloadPending,
+	)
 
 	return nil
 }

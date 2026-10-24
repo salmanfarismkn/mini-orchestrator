@@ -42,3 +42,19 @@ func TestRequireBearerToken(t *testing.T) {
 		})
 	}
 }
+
+func TestRequireBearerTokenRejectsMissingToken(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := RequireBearerToken("test-secret", next)
+	req := httptest.NewRequest(http.MethodGet, "/containers", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
