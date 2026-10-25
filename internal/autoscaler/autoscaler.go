@@ -82,7 +82,12 @@ func (a *Autoscaler) ReconcileService(
 			workload.ID,
 		)
 		if err != nil {
-			continue
+			delete(a.observations, service.ID)
+			return fmt.Errorf(
+				"get metrics for workload %q: %w",
+				workload.ID,
+				err,
+			)
 		}
 
 		totalUsage += float64(stats.CPUUsageMillis)

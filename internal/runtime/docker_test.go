@@ -2,7 +2,10 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"testing"
+	"time"
 )
 
 func TestDockerRuntime(t *testing.T) {
@@ -11,10 +14,15 @@ func TestDockerRuntime(t *testing.T) {
 		t.Fatalf("create runtime: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	var randomName [16]byte
+	if _, err := rand.Read(randomName[:]); err != nil {
+		t.Fatalf("generate unique test container name: %v", err)
+	}
 
 	container, err := runtime.Create(ctx, ContainerConfig{
-		Name:      "mini-orchestrator-test",
+		Name:      "mini-orchestrator-test-" + hex.EncodeToString(randomName[:]),
 		Image:     "nginx:alpine",
 		CPUMillis: 100,
 		MemoryMB:  128,
@@ -24,7 +32,11 @@ func TestDockerRuntime(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_ = runtime.Remove(ctx, container.ID)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if err := runtime.Remove(cleanupCtx, container.ID); err != nil {
+			t.Errorf("remove test-created container: %v", err)
+		}
 	})
 
 	if err := runtime.Start(ctx, container.ID); err != nil {
@@ -53,6 +65,20 @@ func TestDockerRuntime(t *testing.T) {
 			"expected running container, got %q",
 			info.Status,
 		)
+	}
+	containers, err := runtime.List(ctx)
+	if err != nil {
+		t.Fatalf("list orchestrator containers: %v", err)
+	}
+	listedRunning := false
+	for _, listed := range containers {
+		if listed.ID == container.ID && listed.Status == "running" {
+			listedRunning = true
+			break
+		}
+	}
+	if !listedRunning {
+		t.Fatalf("runtime list did not report created container %q as running", container.ID)
 	}
 
 	stats, err := runtime.Stats(ctx, container.ID)

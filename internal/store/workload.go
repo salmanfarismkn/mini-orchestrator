@@ -470,7 +470,6 @@ func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
 		return fmt.Errorf("get workload for failure: %w", err)
 	}
 
-	// Already failed; nothing more to release.
 	if actualState == model.WorkloadFailed {
 		return nil
 	}
@@ -479,34 +478,22 @@ func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
 		result, err := tx.ExecContext(ctx, `
             UPDATE nodes
             SET
-                cpu_allocated_millis =
-                    cpu_allocated_millis - $1,
-                memory_allocated_mb =
-                    memory_allocated_mb - $2,
+                cpu_allocated_millis = GREATEST(cpu_allocated_millis - $1, 0),
+                memory_allocated_mb = GREATEST(memory_allocated_mb - $2, 0),
                 updated_at = NOW()
             WHERE id = $3
-              AND cpu_allocated_millis >= $1
-              AND memory_allocated_mb >= $2
         `,
 			cpuRequest,
 			memoryRequest,
 			*nodeID,
 		)
-
 		if err != nil {
 			return fmt.Errorf("release node resources: %w", err)
 		}
-
-		rows, err := result.RowsAffected()
-		if err != nil {
+		if rows, err := result.RowsAffected(); err != nil {
 			return fmt.Errorf("check resource release: %w", err)
-		}
-
-		if rows == 0 {
-			return fmt.Errorf(
-				"could not release resources for node %q",
-				*nodeID,
-			)
+		} else if rows == 0 {
+			return fmt.Errorf("could not release resources for node %q", *nodeID)
 		}
 	}
 
@@ -520,7 +507,6 @@ func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
 		model.WorkloadFailed,
 		workloadID,
 	)
-
 	if err != nil {
 		return fmt.Errorf("mark workload failed: %w", err)
 	}
@@ -704,14 +690,10 @@ func (p *Postgres) MarkWorkloadStoppedAndReleaseResources(
 		_, err = tx.ExecContext(ctx, `
 			UPDATE nodes
 			SET
-				cpu_allocated_millis =
-					cpu_allocated_millis - $1,
-				memory_allocated_mb =
-					memory_allocated_mb - $2,
+				cpu_allocated_millis = GREATEST(cpu_allocated_millis - $1, 0),
+				memory_allocated_mb = GREATEST(memory_allocated_mb - $2, 0),
 				updated_at = NOW()
 			WHERE id = $3
-			  AND cpu_allocated_millis >= $1
-			  AND memory_allocated_mb >= $2
 		`,
 			cpuRequest,
 			memoryRequest,

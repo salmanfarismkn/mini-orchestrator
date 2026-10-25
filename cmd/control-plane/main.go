@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,12 +13,14 @@ import (
 	"mini-orchestrator/internal/api"
 	"mini-orchestrator/internal/autoscaler"
 	"mini-orchestrator/internal/controller"
+	"mini-orchestrator/internal/httpconfig"
 	"mini-orchestrator/internal/metrics"
 	"mini-orchestrator/internal/node"
 	"mini-orchestrator/internal/observability"
 	"mini-orchestrator/internal/reconciler"
 	"mini-orchestrator/internal/scheduler"
 	"mini-orchestrator/internal/store"
+	"mini-orchestrator/internal/transporttls"
 )
 
 func main() {
@@ -38,6 +41,13 @@ func main() {
 		slog.Error("node authentication configuration is missing")
 		os.Exit(1)
 	}
+	serverTLS, clientTLS, err := transporttls.LoadFromEnv()
+	if err != nil {
+		slog.Error("mutual TLS configuration failed", "error", err)
+		os.Exit(1)
+	}
+	serverTLS = serverTLS.Clone()
+	serverTLS.ClientAuth = tls.VerifyClientCertIfGiven
 
 	dbCtx, cancelDB := context.WithTimeout(
 		context.Background(),
@@ -71,7 +81,10 @@ func main() {
 		schedulerEngine,
 	)
 	nodeClient := node.NewClient(
-		nil,
+		&http.Client{
+			Transport: &http.Transport{TLSClientConfig: clientTLS},
+			Timeout:   10 * time.Second,
+		},
 		nodeToken,
 	)
 	runtimeReconciler := reconciler.NewRuntimeReconciler(
@@ -124,14 +137,15 @@ func main() {
 	)
 
 	httpServer := &http.Server{
-		Addr:              ":8080",
-		Handler:           server.Routes(),
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:      ":8080",
+		Handler:   server.Routes(),
+		TLSConfig: serverTLS,
 	}
+	httpconfig.Apply(httpServer)
 
 	slog.Info("control plane started", "address", httpServer.Addr)
 
-	if err := httpServer.ListenAndServe(); err != nil &&
+	if err := httpServer.ListenAndServeTLS("", ""); err != nil &&
 		err != http.ErrServerClosed {
 		slog.Error("control plane HTTP server failed", "error", err)
 		os.Exit(1)

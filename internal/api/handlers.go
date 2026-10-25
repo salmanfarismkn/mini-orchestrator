@@ -18,6 +18,7 @@ type Server struct {
 	store     *store.Postgres
 	nodeToken string
 	metrics   *observability.Metrics
+	readiness observability.DatabaseChecker
 }
 
 func NewServer(
@@ -29,6 +30,7 @@ func NewServer(
 		store:     store,
 		nodeToken: nodeToken,
 		metrics:   metrics,
+		readiness: store,
 	}
 }
 
@@ -190,7 +192,7 @@ func (s *Server) heartbeat(
 ) {
 	var req heartbeatRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -287,11 +289,6 @@ func (s *Server) createService(
 
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 

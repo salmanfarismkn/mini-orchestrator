@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 )
+
+var ErrContainerNotFound = errors.New("container not found")
 
 type DockerRuntime struct {
 	client *client.Client
@@ -134,11 +137,7 @@ func (d *DockerRuntime) Stop(
 		containerID,
 		container.StopOptions{},
 	); err != nil {
-		return fmt.Errorf(
-			"stop container %q: %w",
-			containerID,
-			err,
-		)
+		return containerOperationError("stop", containerID, err)
 	}
 
 	return nil
@@ -155,11 +154,7 @@ func (d *DockerRuntime) Remove(
 			Force: true,
 		},
 	); err != nil {
-		return fmt.Errorf(
-			"remove container %q: %w",
-			containerID,
-			err,
-		)
+		return containerOperationError("remove", containerID, err)
 	}
 
 	return nil
@@ -171,11 +166,7 @@ func (d *DockerRuntime) Inspect(
 ) (Container, error) {
 	info, err := d.client.ContainerInspect(ctx, containerID)
 	if err != nil {
-		return Container{}, fmt.Errorf(
-			"inspect container %q: %w",
-			containerID,
-			err,
-		)
+		return Container{}, containerOperationError("inspect", containerID, err)
 	}
 
 	status := "unknown"
@@ -196,6 +187,14 @@ func (d *DockerRuntime) Inspect(
 		Image:  info.Config.Image,
 		Status: status,
 	}, nil
+}
+
+func containerOperationError(operation, containerID string, err error) error {
+	if errdefs.IsNotFound(err) {
+		return fmt.Errorf("%s container %q: %w: %w",
+			operation, containerID, ErrContainerNotFound, err)
+	}
+	return fmt.Errorf("%s container %q: %w", operation, containerID, err)
 }
 
 func isOrchestratorManagedContainer(c types.Container) bool {
@@ -252,7 +251,7 @@ func (d *DockerRuntime) List(
 			ID:     c.ID,
 			Name:   name,
 			Image:  c.Image,
-			Status: c.Status,
+			Status: c.State,
 		})
 	}
 

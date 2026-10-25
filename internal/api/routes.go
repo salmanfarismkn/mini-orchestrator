@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+
+	"mini-orchestrator/internal/observability"
 )
 
 func (s *Server) Routes() http.Handler {
@@ -16,7 +18,7 @@ func (s *Server) Routes() http.Handler {
 		"POST /nodes/register",
 		RequireBearerToken(
 			s.nodeToken,
-			http.HandlerFunc(s.registerNode),
+			RequireMutualTLS(http.HandlerFunc(s.registerNode)),
 		),
 	)
 
@@ -24,37 +26,32 @@ func (s *Server) Routes() http.Handler {
 		"POST /nodes/heartbeat",
 		RequireBearerToken(
 			s.nodeToken,
-			http.HandlerFunc(s.heartbeat),
+			RequireMutualTLS(http.HandlerFunc(s.heartbeat)),
 		),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"POST /services",
-		s.createService,
+		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.createService)),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"GET /services/{id}",
-		s.getService,
+		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.getService)),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"PUT /services/{id}",
-		s.updateService,
+		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.updateService)),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"DELETE /services/{id}",
-		s.deleteService,
+		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.deleteService)),
 	)
 
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.Handle("GET /healthz", observability.HealthHandler())
+	mux.Handle("GET /readyz", observability.ReadinessHandler(s.readiness))
 
 	return mux
 

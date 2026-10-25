@@ -38,3 +38,13 @@ func RequireBearerToken(
 		next.ServeHTTP(w, r)
 	})
 }
+
+func RequireMutualTLS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
+			http.Error(w, "mutual TLS is required", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

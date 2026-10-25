@@ -150,15 +150,27 @@ func (p *Postgres) UpdateService(
 		UPDATE services
 		SET
 			name = $1,
-			image = $2,
+			image = $2::VARCHAR(512),
 			desired_replicas = $3,
 			cpu_request_millis = $4,
 			memory_request_mb = $5,
 			deployment_version =
 				CASE
-					WHEN image <> $2
+					WHEN image <> $2::VARCHAR(512)
 					THEN deployment_version + 1
 					ELSE deployment_version
+				END,
+			deployment_status =
+				CASE
+					WHEN image <> $2::VARCHAR(512)
+					THEN $7
+					ELSE deployment_status
+				END,
+			deployment_started_at =
+				CASE
+					WHEN image <> $2::VARCHAR(512)
+					THEN NOW()
+					ELSE deployment_started_at
 				END,
 			updated_at = NOW()
 		WHERE id = $6
@@ -169,6 +181,7 @@ func (p *Postgres) UpdateService(
 		service.CPURequestMillis,
 		service.MemoryRequestMB,
 		service.ID,
+		model.DeploymentProgressing,
 	)
 
 	if err != nil {

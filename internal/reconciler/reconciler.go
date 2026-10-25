@@ -125,6 +125,10 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 				slog.Error("service deletion reconciliation failed",
 					"service_id", service.ID, "error", err)
 			}
+			if err := r.executeScheduledWorkloads(ctx, service); err != nil {
+				slog.Error("workload shutdown failed during service deletion",
+					"service_id", service.ID, "error", err)
+			}
 			continue
 		}
 
@@ -179,6 +183,18 @@ func (r *Reconciler) schedulePendingWorkloads(
 		if workload.ActualState != model.WorkloadPending {
 			continue
 		}
+		if workload.DesiredState == model.WorkloadPending {
+			if err := r.schedulerService.ScheduleWorkload(ctx, workload); err != nil {
+				slog.Error(
+					"pending workload scheduling failed",
+					"workload_id", workload.ID,
+					"service_id", service.ID,
+					"deployment_version", workload.DeploymentVersion,
+					"error", err,
+				)
+				continue
+			}
+		}
 
 		if err := r.executeScheduledWorkloads(ctx, service); err != nil {
 			slog.Error(
@@ -223,7 +239,9 @@ func (r *Reconciler) executeScheduledWorkloads(
 				continue
 			}
 
-		case workload.ActualState != model.WorkloadScheduled:
+		case workload.DesiredState != model.WorkloadScheduled ||
+			(workload.ActualState != model.WorkloadPending &&
+				workload.ActualState != model.WorkloadScheduled):
 			continue
 		}
 

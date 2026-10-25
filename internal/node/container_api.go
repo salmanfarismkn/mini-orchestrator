@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -28,6 +29,7 @@ func (a *Agent) CreateContainer(
 	r *http.Request,
 ) {
 	var req createContainerRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(
@@ -118,6 +120,10 @@ func (a *Agent) StopContainer(
 	}
 
 	if err := a.Runtime.Stop(r.Context(), id); err != nil {
+		if errors.Is(err, runtime.ErrContainerNotFound) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		slog.Error("container stop failed", "container_id", id, "error", err)
 		http.Error(
 			w,
@@ -142,6 +148,10 @@ func (a *Agent) RemoveContainer(
 	}
 
 	if err := a.Runtime.Remove(r.Context(), id); err != nil {
+		if errors.Is(err, runtime.ErrContainerNotFound) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		slog.Error("container remove failed", "container_id", id, "error", err)
 		http.Error(
 			w,
@@ -167,11 +177,12 @@ func (a *Agent) InspectContainer(
 
 	container, err := a.Runtime.Inspect(r.Context(), id)
 	if err != nil {
-		http.Error(
-			w,
-			"container not found",
-			http.StatusNotFound,
-		)
+		if errors.Is(err, runtime.ErrContainerNotFound) {
+			http.Error(w, "container not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("container inspect failed", "container_id", id, "error", err)
+		http.Error(w, "failed to inspect container", http.StatusInternalServerError)
 		return
 	}
 

@@ -92,6 +92,7 @@ func (r *RuntimeReconciler) ReconcileNode(
 			if err := r.store.MarkWorkloadFailedAndReleaseResources(ctx, workload.ID); err != nil {
 				return err
 			}
+			r.metrics.WorkloadFailed()
 		} else {
 			if err := r.store.UpdateWorkloadActualState(ctx, workload.ID, state); err != nil {
 				return err
@@ -131,12 +132,6 @@ func (r *RuntimeReconciler) ReconcileNode(
 			"node_id", node.ID,
 		)
 
-		r.metrics.ContainerMissing()
-
-		if workload.ActualState != model.WorkloadFailed {
-			r.metrics.WorkloadFailed()
-		}
-
 		if err := r.store.MarkWorkloadFailedAndReleaseResources(
 			ctx,
 			workload.ID,
@@ -146,6 +141,8 @@ func (r *RuntimeReconciler) ReconcileNode(
 				err,
 			)
 		}
+		r.metrics.ContainerMissing()
+		r.metrics.WorkloadFailed()
 	}
 
 	return nil

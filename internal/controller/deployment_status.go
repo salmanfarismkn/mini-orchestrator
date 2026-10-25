@@ -29,6 +29,10 @@ func (c *DeploymentStatusController) ReconcileService(
 	ctx context.Context,
 	service model.Service,
 ) error {
+	if service.DeploymentStatus == model.DeploymentFailed {
+		return nil
+	}
+
 	workloads, err := c.store.ListWorkloadsByService(
 		ctx,
 		service.ID,
@@ -40,14 +44,14 @@ func (c *DeploymentStatusController) ReconcileService(
 		)
 	}
 
-	oldRunning := 0
+	oldActive := 0
 	newRunning := 0
 	newFailed := 0
 
 	for _, workload := range workloads {
 		if workload.DeploymentVersion < service.DeploymentVersion {
-			if workload.ActualState == model.WorkloadRunning {
-				oldRunning++
+			if isActive(workload) {
+				oldActive++
 			}
 
 			continue
@@ -69,7 +73,7 @@ func (c *DeploymentStatusController) ReconcileService(
 	// Rollout is complete when every desired replica
 	// is running on the current version and no old replicas remain.
 	if newRunning == service.DesiredReplicas &&
-		oldRunning == 0 {
+		oldActive == 0 {
 		if err := c.store.UpdateDeploymentStatus(
 			ctx,
 			service.ID,

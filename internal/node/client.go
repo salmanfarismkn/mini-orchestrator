@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"mini-orchestrator/internal/runtime"
 )
@@ -20,7 +21,7 @@ func NewClient(
 	token string,
 ) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 
 	return &Client{
@@ -61,7 +62,7 @@ func (c *Client) CreateContainer(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		"http://"+nodeAddress+"/containers",
+		"https://"+nodeAddress+"/containers",
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -111,7 +112,7 @@ func (c *Client) StartContainer(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		"http://"+nodeAddress+"/containers/"+containerID+"/start",
+		"https://"+nodeAddress+"/containers/"+containerID+"/start",
 		nil,
 	)
 	if err != nil {
@@ -144,7 +145,7 @@ func (c *Client) ListContainers(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		"http://"+nodeAddress+"/containers",
+		"https://"+nodeAddress+"/containers",
 		nil,
 	)
 	if err != nil {
@@ -187,7 +188,7 @@ func (c *Client) StopContainer(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		"http://"+nodeAddress+"/containers/"+containerID+"/stop",
+		"https://"+nodeAddress+"/containers/"+containerID+"/stop",
 		nil,
 	)
 	if err != nil {
@@ -221,7 +222,7 @@ func (c *Client) DeleteContainer(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodDelete,
-		"http://"+nodeAddress+"/containers/"+containerID,
+		"https://"+nodeAddress+"/containers/"+containerID,
 		nil,
 	)
 	if err != nil {
@@ -255,7 +256,7 @@ func (c *Client) GetContainer(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		"http://"+nodeAddress+"/containers/"+containerID,
+		"https://"+nodeAddress+"/containers/"+containerID,
 		nil,
 	)
 	if err != nil {
@@ -304,7 +305,7 @@ func (c *Client) GetContainerStats(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		"http://"+nodeAddress+
+		"https://"+nodeAddress+
 			"/containers/"+containerID+"/stats",
 		nil,
 	)
