@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -59,6 +60,7 @@ func (a *Agent) CreateContainer(
 		},
 	)
 	if err != nil {
+		slog.Error("container create failed", "container_name", req.Name, "error", err)
 		http.Error(
 			w,
 			"failed to create container",
@@ -92,6 +94,7 @@ func (a *Agent) StartContainer(
 	}
 
 	if err := a.Runtime.Start(r.Context(), id); err != nil {
+		slog.Error("container start failed", "container_id", id, "error", err)
 		http.Error(
 			w,
 			"failed to start container",
@@ -115,6 +118,7 @@ func (a *Agent) StopContainer(
 	}
 
 	if err := a.Runtime.Stop(r.Context(), id); err != nil {
+		slog.Error("container stop failed", "container_id", id, "error", err)
 		http.Error(
 			w,
 			"failed to stop container",
@@ -138,6 +142,7 @@ func (a *Agent) RemoveContainer(
 	}
 
 	if err := a.Runtime.Remove(r.Context(), id); err != nil {
+		slog.Error("container remove failed", "container_id", id, "error", err)
 		http.Error(
 			w,
 			"failed to remove container",
@@ -181,6 +186,7 @@ func (a *Agent) ListContainers(
 ) {
 	containers, err := a.Runtime.List(r.Context())
 	if err != nil {
+		slog.Error("container list failed", "error", err)
 		http.Error(
 			w,
 			"failed to list containers",

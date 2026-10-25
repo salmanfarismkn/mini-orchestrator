@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -143,10 +143,10 @@ func (a *Agent) RunHeartbeatLoop(ctx context.Context) {
 
 	for {
 		if err := a.Heartbeat(ctx); err != nil {
-			log.Printf(
-				"heartbeat failed for node %s: %v",
-				a.ID,
-				err,
+			slog.Error(
+				"node heartbeat failed",
+				"node_id", a.ID,
+				"error", err,
 			)
 		}
 

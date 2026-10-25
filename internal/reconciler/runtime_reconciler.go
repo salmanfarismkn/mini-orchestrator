@@ -7,6 +7,7 @@ import (
 
 	"mini-orchestrator/internal/model"
 	"mini-orchestrator/internal/node"
+	"mini-orchestrator/internal/observability"
 	"mini-orchestrator/internal/store"
 )
 
@@ -14,16 +15,19 @@ type RuntimeReconciler struct {
 	store      *store.Postgres
 	nodeClient *node.Client
 	logger     *slog.Logger
+	metrics    *observability.Metrics
 }
 
 func NewRuntimeReconciler(
 	store *store.Postgres,
 	nodeClient *node.Client,
+	metrics *observability.Metrics,
 ) *RuntimeReconciler {
 	return &RuntimeReconciler{
 		store:      store,
 		nodeClient: nodeClient,
 		logger:     slog.Default(),
+		metrics:    metrics,
 	}
 }
 
@@ -127,8 +131,20 @@ func (r *RuntimeReconciler) ReconcileNode(
 			"node_id", node.ID,
 		)
 
-		if err := r.store.MarkWorkloadFailedAndReleaseResources(ctx, workload.ID); err != nil {
-			return fmt.Errorf("mark missing workload failed: %w", err)
+		r.metrics.ContainerMissing()
+
+		if workload.ActualState != model.WorkloadFailed {
+			r.metrics.WorkloadFailed()
+		}
+
+		if err := r.store.MarkWorkloadFailedAndReleaseResources(
+			ctx,
+			workload.ID,
+		); err != nil {
+			return fmt.Errorf(
+				"mark missing workload failed: %w",
+				err,
+			)
 		}
 	}
 

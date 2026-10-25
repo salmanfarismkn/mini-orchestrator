@@ -10,21 +10,25 @@ import (
 	"time"
 
 	"mini-orchestrator/internal/model"
+	"mini-orchestrator/internal/observability"
 	"mini-orchestrator/internal/store"
 )
 
 type Server struct {
 	store     *store.Postgres
 	nodeToken string
+	metrics   *observability.Metrics
 }
 
 func NewServer(
 	store *store.Postgres,
 	nodeToken string,
+	metrics *observability.Metrics,
 ) *Server {
 	return &Server{
 		store:     store,
 		nodeToken: nodeToken,
+		metrics:   metrics,
 	}
 }
 
@@ -348,12 +352,20 @@ func (s *Server) createService(
 	); err != nil {
 		slog.Error(
 			"failed to create service",
+			"service_id", service.ID,
 			"error", err,
 		)
 
 		writeError(w, http.StatusInternalServerError, "failed to create service")
 		return
 	}
+
+	slog.Info(
+		"deployment started",
+		"service_id", service.ID,
+		"deployment_version", service.DeploymentVersion,
+		"state", service.DeploymentStatus,
+	)
 
 	w.Header().Set(
 		"Content-Type",
@@ -419,6 +431,7 @@ func (s *Server) updateService(
 		return
 	}
 
+	oldDeploymentVersion := service.DeploymentVersion
 	service.Name = req.Name
 	service.Image = req.Image
 	service.DesiredReplicas = req.Replicas
@@ -448,6 +461,14 @@ func (s *Server) updateService(
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read updated service")
 		return
+	}
+	if service.DeploymentVersion > oldDeploymentVersion {
+		slog.Info(
+			"deployment started",
+			"service_id", service.ID,
+			"deployment_version", service.DeploymentVersion,
+			"state", service.DeploymentStatus,
+		)
 	}
 
 	w.Header().Set(

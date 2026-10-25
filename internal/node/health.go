@@ -2,7 +2,7 @@ package node
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"mini-orchestrator/internal/model"
@@ -46,7 +46,7 @@ func (h *HealthChecker) Run(ctx context.Context) {
 func (h *HealthChecker) check(ctx context.Context) {
 	nodes, err := h.store.ListNodes(ctx)
 	if err != nil {
-		log.Printf("node health check failed: %v", err)
+		slog.Error("node health check failed", "error", err)
 		return
 	}
 
@@ -59,9 +59,10 @@ func (h *HealthChecker) check(ctx context.Context) {
 		}
 
 		if node.Status != model.NodeUnhealthy {
-			log.Printf(
-				"node %s marked unhealthy",
-				node.ID,
+			slog.Warn(
+				"node marked unhealthy",
+				"node_id", node.ID,
+				"state", model.NodeUnhealthy,
 			)
 
 			if err := h.store.SetNodeStatus(
@@ -69,10 +70,10 @@ func (h *HealthChecker) check(ctx context.Context) {
 				node.ID,
 				model.NodeUnhealthy,
 			); err != nil {
-				log.Printf(
-					"failed to mark node %s unhealthy: %v",
-					node.ID,
-					err,
+				slog.Error(
+					"failed to mark node unhealthy",
+					"node_id", node.ID,
+					"error", err,
 				)
 			}
 		}

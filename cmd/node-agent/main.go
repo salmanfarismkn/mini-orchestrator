@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -27,17 +27,19 @@ func (a *runtimeAdapter) Stats(ctx context.Context, containerID string) (runtime
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("warning: .env file not found")
+		slog.Warn(".env file not found")
 	}
 
 	nodeToken := os.Getenv("ORCHESTRATOR_NODE_TOKEN")
 	if nodeToken == "" {
-		log.Fatal("ORCHESTRATOR_NODE_TOKEN must be configured")
+		slog.Error("node authentication configuration is missing")
+		os.Exit(1)
 	}
 
 	dockerRuntime, err := runtime.NewDockerRuntime()
 	if err != nil {
-		log.Fatalf("create docker runtime: %v", err)
+		slog.Error("create Docker runtime failed", "error", err)
+		os.Exit(1)
 	}
 
 	agent := &node.Agent{
@@ -59,10 +61,15 @@ func main() {
 	defer cancel()
 
 	if err := agent.Register(registerCtx); err != nil {
-		log.Fatalf("node registration failed: %v", err)
+		slog.Error("node registration failed", "node_id", agent.ID, "error", err)
+		os.Exit(1)
 	}
 
-	log.Printf("node %s registered successfully", agent.ID)
+	slog.Info(
+		"node registered successfully",
+		"node_id", agent.ID,
+		"address", agent.Address,
+	)
 
 	go agent.RunHeartbeatLoop(ctx)
 
@@ -71,10 +78,14 @@ func main() {
 		Handler: api.RequireBearerToken(nodeToken, agent.Routes()),
 	}
 
-	log.Println("node agent listening on :9001")
+	slog.Info(
+		"node agent started",
+		"address", ":9001",
+	)
 
 	if err := server.ListenAndServe(); err != nil &&
 		err != http.ErrServerClosed {
-		log.Fatalf("node agent failed: %v", err)
+		slog.Error("node agent HTTP server failed", "node_id", agent.ID, "error", err)
+		os.Exit(1)
 	}
 }

@@ -98,10 +98,21 @@ func (e *WorkloadExecutor) Stop(
 
 	// Pending workloads don't have a container.
 	if workload.ContainerID == nil {
-		return e.store.MarkWorkloadStoppedAndReleaseResources(
+		if err := e.store.MarkWorkloadStoppedAndReleaseResources(
 			ctx,
 			workload.ID,
+		); err != nil {
+			return err
+		}
+		slog.Info(
+			"replica removed",
+			"workload_id", workload.ID,
+			"service_id", workload.ServiceID,
+			"node_id", node.ID,
+			"deployment_version", workload.DeploymentVersion,
+			"state", model.WorkloadStopped,
 		)
+		return nil
 	}
 
 	containerID := *workload.ContainerID
@@ -141,10 +152,13 @@ func (e *WorkloadExecutor) Stop(
 	}
 
 	slog.Info(
-		"workload stopped",
+		"replica removed",
 		"workload_id", workload.ID,
+		"service_id", workload.ServiceID,
 		"container_id", containerID,
 		"node_id", node.ID,
+		"deployment_version", workload.DeploymentVersion,
+		"state", model.WorkloadStopped,
 	)
 
 	return nil

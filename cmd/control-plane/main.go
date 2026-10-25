@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -14,6 +14,7 @@ import (
 	"mini-orchestrator/internal/controller"
 	"mini-orchestrator/internal/metrics"
 	"mini-orchestrator/internal/node"
+	"mini-orchestrator/internal/observability"
 	"mini-orchestrator/internal/reconciler"
 	"mini-orchestrator/internal/scheduler"
 	"mini-orchestrator/internal/store"
@@ -22,18 +23,20 @@ import (
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("warning: .env file not found")
+		slog.Warn(".env file not found")
 	}
 
 	dsn := os.Getenv("DATABASE_URL")
 
 	if dsn == "" {
-		log.Fatal("DATABASE_URL is required")
+		slog.Error("database configuration is missing")
+		os.Exit(1)
 	}
 
 	nodeToken := os.Getenv("ORCHESTRATOR_NODE_TOKEN")
 	if nodeToken == "" {
-		log.Fatal("ORCHESTRATOR_NODE_TOKEN must be configured")
+		slog.Error("node authentication configuration is missing")
+		os.Exit(1)
 	}
 
 	dbCtx, cancelDB := context.WithTimeout(
@@ -44,9 +47,12 @@ func main() {
 	db, err := store.NewPostgres(dbCtx, dsn)
 	cancelDB()
 	if err != nil {
-		log.Fatalf("database connection failed: %v", err)
+		slog.Error("database connection failed", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
+
+	apiMetrics := &observability.Metrics{}
 
 	appCtx, cancelApp := context.WithCancel(context.Background())
 	defer cancelApp()
@@ -71,6 +77,7 @@ func main() {
 	runtimeReconciler := reconciler.NewRuntimeReconciler(
 		db,
 		nodeClient,
+		apiMetrics,
 	)
 	executor := reconciler.NewWorkloadExecutor(
 		db,
@@ -89,6 +96,7 @@ func main() {
 		executor,
 		runtimeReconciler,
 		5*time.Second,
+		apiMetrics,
 	)
 	metricsProvider := metrics.NewNodeProvider(
 		db,
@@ -112,6 +120,7 @@ func main() {
 	server := api.NewServer(
 		db,
 		nodeToken,
+		apiMetrics,
 	)
 
 	httpServer := &http.Server{
@@ -120,10 +129,11 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Println("control plane listening on :8080")
+	slog.Info("control plane started", "address", httpServer.Addr)
 
 	if err := httpServer.ListenAndServe(); err != nil &&
 		err != http.ErrServerClosed {
-		log.Fatalf("HTTP server failed: %v", err)
+		slog.Error("control plane HTTP server failed", "error", err)
+		os.Exit(1)
 	}
 }

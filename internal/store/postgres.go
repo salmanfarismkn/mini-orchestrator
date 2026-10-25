@@ -29,3 +29,7 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 func (p *Postgres) Close() error {
 	return p.db.Close()
 }
+
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.db.PingContext(ctx)
+}
