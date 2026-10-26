@@ -1,1 +1,16 @@
 .env
+.env.*
+!.env.example
+
+# Local TLS credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Generated binaries and database exports
+/bin/
+*.dump
+*.backup
+*.sql.gz

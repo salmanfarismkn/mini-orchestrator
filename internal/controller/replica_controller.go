@@ -28,6 +28,9 @@ func (c *ReplicaController) ReconcileService(
 	if service.Status != model.ServiceActive {
 		return nil
 	}
+	if service.DeploymentStatus == model.DeploymentFailed {
+		return nil
+	}
 
 	workloads, err := c.store.ListWorkloadsByService(ctx, service.ID)
 	if err != nil {
@@ -90,7 +93,7 @@ func (c *ReplicaController) ReconcileService(
 	}
 
 	// Enforce maxUnavailable = 0
-	if newRunning == 0 {
+	if newRunning == 0 && service.DesiredReplicas > 0 {
 		return nil
 	}
 

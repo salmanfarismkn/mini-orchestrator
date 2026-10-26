@@ -25,6 +25,10 @@ func (c *DeploymentController) ReconcileService(
 	ctx context.Context,
 	service model.Service,
 ) error {
+	if service.DeploymentStatus == model.DeploymentFailed {
+		return nil
+	}
+
 	workloads, err := c.store.ListWorkloadsByService(
 		ctx,
 		service.ID,
@@ -40,6 +44,13 @@ func (c *DeploymentController) ReconcileService(
 
 	if len(oldWorkloads) == 0 {
 		return nil
+	}
+
+	for _, workload := range workloads {
+		if workload.DeploymentVersion == service.DeploymentVersion &&
+			workload.ActualState == model.WorkloadFailed {
+			return nil
+		}
 	}
 
 	newWorkloads := newActiveWorkloads(
@@ -72,6 +83,11 @@ func (c *DeploymentController) ReconcileService(
 
 	// We have enough new capacity. Now remove one old replica.
 	old := oldWorkloads[0]
+	if old.ActualState == model.WorkloadRunning &&
+		runningActiveWorkloads(workloads)-1 <
+			service.DesiredReplicas-service.MaxUnavailable {
+		return nil
+	}
 
 	if err := c.store.UpdateWorkloadDesiredState(
 		ctx,
@@ -95,6 +111,17 @@ func (c *DeploymentController) ReconcileService(
 	)
 
 	return nil
+}
+
+func runningActiveWorkloads(workloads []model.Workload) int {
+	count := 0
+	for _, workload := range workloads {
+		if workload.ActualState == model.WorkloadRunning &&
+			workload.DesiredState != model.WorkloadStopped {
+			count++
+		}
+	}
+	return count
 }
 
 func oldActiveWorkloads(

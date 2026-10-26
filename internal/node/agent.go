@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"mini-orchestrator/internal/runtime"
@@ -33,6 +35,9 @@ type registrationRequest struct {
 }
 
 func (a *Agent) Register(ctx context.Context) error {
+	if err := a.validateControlPlaneURL(); err != nil {
+		return err
+	}
 	payload := registrationRequest{
 		ID:             a.ID,
 		Address:        a.Address,
@@ -48,7 +53,7 @@ func (a *Agent) Register(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		a.ControlPlaneURL+"/nodes/register",
+		strings.TrimRight(a.ControlPlaneURL, "/")+"/nodes/register",
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -89,6 +94,9 @@ type heartbeatRequest struct {
 }
 
 func (a *Agent) Heartbeat(ctx context.Context) error {
+	if err := a.validateControlPlaneURL(); err != nil {
+		return err
+	}
 	payload := heartbeatRequest{
 		ID: a.ID,
 	}
@@ -101,12 +109,13 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		a.ControlPlaneURL+"/nodes/heartbeat",
+		strings.TrimRight(a.ControlPlaneURL, "/")+"/nodes/heartbeat",
 		bytes.NewReader(body),
 	)
 	if err != nil {
 		return fmt.Errorf("create heartbeat request: %w", err)
 	}
+
 	req.Header.Set(
 		"Authorization",
 		"Bearer "+a.Token,
@@ -133,7 +142,14 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 			resp.StatusCode,
 		)
 	}
+	return nil
+}
 
+func (a *Agent) validateControlPlaneURL() error {
+	parsed, err := url.Parse(a.ControlPlaneURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return fmt.Errorf("control plane URL must be an HTTPS URL")
+	}
 	return nil
 }
 

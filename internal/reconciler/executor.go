@@ -64,7 +64,9 @@ func (e *WorkloadExecutor) Execute(
 			"error", err,
 		)
 
-		_ = e.store.MarkWorkloadFailed(ctx, workload.ID)
+		if err := e.store.MarkWorkloadFailedAndReleaseResources(ctx, workload.ID); err != nil {
+			return fmt.Errorf("persist failed workload: %w", err)
+		}
 
 		return fmt.Errorf("start container: %w", err)
 	}
@@ -93,6 +95,9 @@ func (e *WorkloadExecutor) Stop(
 	node model.Node,
 ) error {
 	if workload.DesiredState != model.WorkloadStopped {
+		return nil
+	}
+	if workload.ActualState == model.WorkloadStopped {
 		return nil
 	}
 
