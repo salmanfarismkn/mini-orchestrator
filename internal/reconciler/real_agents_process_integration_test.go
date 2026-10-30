@@ -305,6 +305,10 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 		t.Fatalf("list real-agent workloads: %v", err)
 	}
 	assertProcessAgentPlacement(t, ctx, env, workloads, agentIDs)
+	existingWorkloadIDs := make(map[string]struct{}, len(workloads))
+	for _, workload := range workloads {
+		existingWorkloadIDs[workload.ID] = struct{}{}
+	}
 	missingWorkload := workloads[0]
 	if missingWorkload.ContainerID == nil {
 		t.Fatal("running workload has no Docker container ID")
@@ -313,25 +317,73 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 	if err := dockerRuntime.Remove(ctx, missingContainerID); err != nil {
 		t.Fatalf("remove test-created container before recovery: %v", err)
 	}
+	var replacementWorkload model.Workload
 	pollUntil(t, ctx, 40*time.Second, func() (bool, error) {
 		current, err := env.store.ListWorkloadsByService(ctx, serviceID)
 		if err != nil {
 			return false, err
 		}
-		failedMissing := false
+		originalFailed := false
 		for _, workload := range current {
-			if workload.ContainerID != nil && *workload.ContainerID == missingContainerID &&
-				workload.ActualState == model.WorkloadFailed {
-				failedMissing = true
+			if workload.ID == missingWorkload.ID &&
+				workload.ActualState == model.WorkloadFailed &&
+				workload.ContainerID != nil &&
+				*workload.ContainerID == missingContainerID {
+				originalFailed = true
+				continue
+			}
+			if _, existedBeforeFailure := existingWorkloadIDs[workload.ID]; existedBeforeFailure ||
+				workload.ActualState != model.WorkloadRunning ||
+				workload.ContainerID == nil ||
+				*workload.ContainerID == "" {
+				continue
+			}
+			container, inspectErr := dockerRuntime.Inspect(ctx, *workload.ContainerID)
+			if inspectErr != nil {
+				if errors.Is(inspectErr, orchestratorRuntime.ErrContainerNotFound) {
+					continue
+				}
+				return false, inspectErr
+			}
+			if container.Status == "running" {
+				replacementWorkload = workload
+				break
 			}
 		}
-		return failedMissing && countRunning(current) == 2, nil
+		return originalFailed &&
+			replacementWorkload.ID != "" &&
+			replacementWorkload.ID != missingWorkload.ID &&
+			replacementWorkload.ContainerID != nil &&
+			*replacementWorkload.ContainerID != "" &&
+			countRunning(current) == 2, nil
 	})
 	workloads, err = env.store.ListWorkloadsByService(ctx, serviceID)
 	if err != nil {
 		t.Fatalf("list workloads after missing-container recovery: %v", err)
 	}
+	replacementWorkload, err = env.store.GetWorkload(ctx, replacementWorkload.ID)
+	if err != nil {
+		t.Fatalf("read replacement workload: %v", err)
+	}
+	if replacementWorkload.ID == missingWorkload.ID ||
+		replacementWorkload.ServiceID != serviceID ||
+		replacementWorkload.ActualState != model.WorkloadRunning ||
+		replacementWorkload.ContainerID == nil ||
+		*replacementWorkload.ContainerID == "" {
+		t.Fatalf("replacement workload = %+v; want a distinct running workload with a container ID",
+			replacementWorkload)
+	}
+	replacementContainer, err := dockerRuntime.Inspect(ctx, *replacementWorkload.ContainerID)
+	if err != nil {
+		t.Fatalf("inspect replacement Docker container %q: %v",
+			*replacementWorkload.ContainerID, err)
+	}
+	if replacementContainer.Status != "running" {
+		t.Fatalf("replacement Docker container %q status = %q; want running",
+			*replacementWorkload.ContainerID, replacementContainer.Status)
+	}
 	assertProcessAgentPlacement(t, ctx, env, workloads, agentIDs)
+	assertAllocationsMatchActiveWorkloads(t, ctx, env, serviceID)
 
 	failedNodeID := ""
 	for _, workload := range workloads {
