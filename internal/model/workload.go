@@ -12,6 +12,16 @@ const (
 	WorkloadStopped   WorkloadState = "STOPPED"
 )
 
+type ExecutionState string
+
+const (
+	ExecutionIdle     ExecutionState = "IDLE"
+	ExecutionStarting ExecutionState = "STARTING"
+	ExecutionCreated  ExecutionState = "CREATED"
+	ExecutionRunning  ExecutionState = "RUNNING"
+	ExecutionFailed   ExecutionState = "FAILED"
+)
+
 type Workload struct {
 	ID                string
 	ServiceID         string
@@ -23,6 +33,9 @@ type Workload struct {
 	DeploymentVersion int
 	DesiredState      WorkloadState
 	ActualState       WorkloadState
+	ExecutionState    ExecutionState
+	ExecutionError    string
+	ResourceReserved  bool
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }

@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -64,6 +65,7 @@ type integrationTLSFiles struct {
 	certificate string
 	privateKey  string
 	ca          string
+	nodes       map[string]integrationTLSFiles
 }
 
 type integrationContainer struct {
@@ -213,13 +215,20 @@ func TestMultiNodeSchedulingIntegration(t *testing.T) {
 	drainingNodeID := integrationID(t, "draining")
 	env.cleanupTestData(t, serviceID, drainingNodeID)
 
-	if err := env.store.RegisterNode(ctx, model.Node{
+	drainingIdentity := "spiffe://mini-orchestrator/node/" + drainingNodeID
+	if _, err := env.database.ExecContext(ctx, `
+		INSERT INTO nodes (id, address, cpu_capacity_millis, memory_capacity_mb, status, certificate_identity)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, drainingNodeID, "127.0.0.1:1", 8000, 8192, model.NodeDraining, drainingIdentity); err != nil {
+		t.Fatalf("enroll draining node: %v", err)
+	}
+	if _, err := env.store.RegisterNode(ctx, model.Node{
 		ID:             drainingNodeID,
 		Address:        "127.0.0.1:1",
 		CPUCapacity:    8000,
 		MemoryCapacity: 8192,
 		Status:         model.NodeDraining,
-	}); err != nil {
+	}, drainingIdentity, "integration-draining-"+drainingNodeID); err != nil {
 		t.Fatalf("register draining node: %v", err)
 	}
 
@@ -641,6 +650,101 @@ func TestMultiNodeServiceDeletionIntegration(t *testing.T) {
 	assertAllocationsMatchActiveWorkloads(t, ctx, env, serviceID)
 }
 
+func TestResourceReservationIdempotencyIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+
+	env := newMultiNodeEnvironment(t)
+	serviceID := integrationID(t, "reservation-service")
+	nodeID := integrationID(t, "reservation-node")
+	env.cleanupTestData(t, serviceID, nodeID)
+
+	nodeIdentity := "spiffe://mini-orchestrator/node/" + nodeID
+	if _, err := env.database.ExecContext(ctx, `
+		INSERT INTO nodes (id, address, cpu_capacity_millis, memory_capacity_mb, status, certificate_identity)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, nodeID, "127.0.0.1:1", 1000, 1024, model.NodeReady, nodeIdentity); err != nil {
+		t.Fatalf("enroll reservation node: %v", err)
+	}
+	if _, err := env.store.RegisterNode(ctx, model.Node{
+		ID: nodeID, Address: "127.0.0.1:1", CPUCapacity: 1000, MemoryCapacity: 1024,
+		Status: model.NodeReady, LastHeartbeat: time.Now().UTC(), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, nodeIdentity, "integration-reservation-"+nodeID); err != nil {
+		t.Fatalf("register reservation node: %v", err)
+	}
+	service := model.Service{
+		ID: serviceID, Name: serviceID, Image: "integration/test:latest", DesiredReplicas: 1,
+		CPURequestMillis: 300, MemoryRequestMB: 256, DeploymentVersion: 1, MaxSurge: 1,
+		DeploymentStatus: model.DeploymentAvailable, Status: model.ServiceActive,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := env.store.CreateService(ctx, service); err != nil {
+		t.Fatalf("create reservation service: %v", err)
+	}
+	workload := model.Workload{
+		ID: integrationID(t, "reservation-workload"), ServiceID: serviceID, Image: service.Image,
+		CPURequestMillis: 300, MemoryRequestMB: 256, DeploymentVersion: 1,
+		DesiredState: model.WorkloadPending, ActualState: model.WorkloadPending,
+		ExecutionState: model.ExecutionIdle, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := env.store.CreatePendingWorkload(ctx, workload); err != nil {
+		t.Fatalf("create pending workload: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- env.store.ReserveNodeForWorkload(ctx, workload.ID, nodeID, workload.CPURequestMillis, workload.MemoryRequestMB)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent reservation failed: %v", err)
+		}
+	}
+
+	stored, err := env.store.GetWorkload(ctx, workload.ID)
+	if err != nil {
+		t.Fatalf("get reserved workload: %v", err)
+	}
+	if !stored.ResourceReserved || stored.DesiredState != model.WorkloadScheduled || stored.NodeID == nil {
+		t.Fatalf("unexpected reservation state: reserved=%v desired=%q node=%v", stored.ResourceReserved, stored.DesiredState, stored.NodeID)
+	}
+	node, err := env.store.GetNode(ctx, nodeID)
+	if err != nil {
+		t.Fatalf("get reservation node: %v", err)
+	}
+	if node.CPUAllocated != 300 || node.MemoryAllocated != 256 {
+		t.Fatalf("allocated resources = (%d CPU, %d memory); want (300, 256)", node.CPUAllocated, node.MemoryAllocated)
+	}
+
+	if err := env.store.MarkWorkloadStoppedAndReleaseResources(ctx, workload.ID); err != nil {
+		t.Fatalf("first stop release: %v", err)
+	}
+	if err := env.store.MarkWorkloadStoppedAndReleaseResources(ctx, workload.ID); err != nil {
+		t.Fatalf("repeated stop release: %v", err)
+	}
+	stored, err = env.store.GetWorkload(ctx, workload.ID)
+	if err != nil {
+		t.Fatalf("get stopped workload: %v", err)
+	}
+	if stored.ResourceReserved || stored.ActualState != model.WorkloadStopped || stored.NodeID != nil {
+		t.Fatalf("unexpected stopped state: reserved=%v actual=%q node=%v", stored.ResourceReserved, stored.ActualState, stored.NodeID)
+	}
+	node, err = env.store.GetNode(ctx, nodeID)
+	if err != nil {
+		t.Fatalf("get released node: %v", err)
+	}
+	if node.CPUAllocated != 0 || node.MemoryAllocated != 0 {
+		t.Fatalf("allocated resources after release = (%d CPU, %d memory); want zero", node.CPUAllocated, node.MemoryAllocated)
+	}
+}
+
 func newMultiNodeEnvironment(t *testing.T) *multiNodeEnvironment {
 	t.Helper()
 
@@ -788,21 +892,30 @@ func newMultiNodeEnvironment(t *testing.T) *multiNodeEnvironment {
 		tlsFiles:     tlsFiles,
 	}
 	for index := 0; index < 2; index++ {
-		nodeID := integrationID(t, fmt.Sprintf("node%d", index+1))
+		nodeID := fmt.Sprintf("worker-%02d", index+1)
+		nodeFiles := tlsFiles.nodes[nodeID]
+		nodeServerTLS, nodeClientTLS, err := transporttls.Load(
+			nodeFiles.certificate,
+			nodeFiles.privateKey,
+			nodeFiles.ca,
+		)
+		if err != nil {
+			t.Fatalf("load TLS configuration for node %q: %v", nodeID, err)
+		}
 		agent := &node.Agent{
 			ID:              nodeID,
 			CPUCapacity:     1000,
 			MemoryCapacity:  512,
 			ControlPlaneURL: controlPlane.URL,
 			Client: &http.Client{
-				Transport: &http.Transport{TLSClientConfig: clientTLS},
+				Transport: &http.Transport{TLSClientConfig: nodeClientTLS},
 				Timeout:   5 * time.Second,
 			},
 			Runtime: newIntegrationRuntime(nodeID),
 			Token:   token,
 		}
 		agentServer := httptest.NewUnstartedServer(api.RequireBearerToken(token, agent.Routes()))
-		agentServer.TLS = serverTLS.Clone()
+		agentServer.TLS = nodeServerTLS.Clone()
 		agentServer.StartTLS()
 		t.Cleanup(agentServer.Close)
 
@@ -811,6 +924,19 @@ func newMultiNodeEnvironment(t *testing.T) *multiNodeEnvironment {
 			t.Fatalf("parse node agent URL: %v", err)
 		}
 		agent.Address = parsedURL.Host
+		certificateIdentity := "spiffe://mini-orchestrator/node/" + nodeID
+		if _, err := env.database.ExecContext(ctx, `
+			INSERT INTO nodes (id, address, cpu_capacity_millis, memory_capacity_mb, status, certificate_identity)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (id) DO UPDATE SET
+				address = EXCLUDED.address,
+				cpu_capacity_millis = EXCLUDED.cpu_capacity_millis,
+				memory_capacity_mb = EXCLUDED.memory_capacity_mb,
+				certificate_identity = EXCLUDED.certificate_identity,
+				updated_at = NOW()
+		`, nodeID, agent.Address, agent.CPUCapacity, agent.MemoryCapacity, model.NodeReady, certificateIdentity); err != nil {
+			t.Fatalf("enroll node agent %q: %v", nodeID, err)
+		}
 		if err := agent.Register(ctx); err != nil {
 			t.Fatalf("register node agent %q: %v", agent.ID, err)
 		}
@@ -834,6 +960,15 @@ func newMultiNodeEnvironment(t *testing.T) *multiNodeEnvironment {
 		if registered.Status != model.NodeReady || !registered.LastHeartbeat.After(staleHeartbeat) {
 			t.Fatalf("node %q heartbeat state = (%q, %s); want READY and newer heartbeat",
 				agent.ID, registered.Status, registered.LastHeartbeat)
+		}
+		if registered.LeaseGeneration < 1 {
+			t.Fatalf("node %q has invalid lease generation %d", agent.ID, registered.LeaseGeneration)
+		}
+		if registered.RegistrationID == "" {
+			t.Fatalf("node %q has no registration id", agent.ID)
+		}
+		if agent.LeaseGeneration != registered.LeaseGeneration {
+			t.Fatalf("agent %q generation = %d; database generation = %d", agent.ID, agent.LeaseGeneration, registered.LeaseGeneration)
 		}
 
 		env.agents = append(env.agents, agent)
@@ -890,6 +1025,107 @@ func pollUntil(
 			t.Fatalf("condition was not met within %s: %v", timeout, pollCtx.Err())
 		case <-ticker.C:
 		}
+	}
+}
+
+func TestNodeLeaseGenerationIntegration(t *testing.T) {
+	if os.Getenv(integrationOptInEnv) != "1" {
+		t.Skip("set MINI_ORCHESTRATOR_INTEGRATION=1 to run PostgreSQL-backed multi-node integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+	env := newMultiNodeEnvironment(t)
+	nodeID := integrationID(t, "lease-node")
+	env.cleanupTestData(t, nodeID)
+
+	identity := "spiffe://mini-orchestrator/node/" + nodeID
+	if _, err := env.database.ExecContext(ctx, `
+		INSERT INTO nodes (id, address, cpu_capacity_millis, memory_capacity_mb, status, certificate_identity)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, nodeID, "127.0.0.1:1", 1000, 512, model.NodeReady, identity); err != nil {
+		t.Fatalf("enroll lease node: %v", err)
+	}
+
+	const concurrentRegistrations = 8
+	generations := make(chan int64, concurrentRegistrations)
+	registrationErrors := make(chan error, concurrentRegistrations)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrentRegistrations; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			generation, err := env.store.RegisterNode(ctx, model.Node{
+				ID: nodeID, Address: fmt.Sprintf("127.0.0.1:%d", 9000+index),
+				CPUCapacity: 1000, MemoryCapacity: 512, Status: model.NodeReady,
+			}, identity, fmt.Sprintf("lease-owner-%02d", index))
+			if err != nil {
+				registrationErrors <- err
+				return
+			}
+			generations <- generation
+		}(i)
+	}
+	wg.Wait()
+	close(generations)
+	close(registrationErrors)
+	for err := range registrationErrors {
+		if err != nil {
+			t.Fatalf("concurrent registration: %v", err)
+		}
+	}
+
+	var finalGeneration int64
+	if err := env.database.QueryRowContext(ctx,
+		`SELECT lease_generation FROM nodes WHERE id = $1`, nodeID,
+	).Scan(&finalGeneration); err != nil {
+		t.Fatalf("read final lease generation: %v", err)
+	}
+	if finalGeneration != concurrentRegistrations+1 {
+		t.Fatalf("final generation = %d; want %d", finalGeneration, concurrentRegistrations+1)
+	}
+	for generation := range generations {
+		if generation < 1 || generation > finalGeneration {
+			t.Fatalf("unexpected registration generation %d for final %d", generation, finalGeneration)
+		}
+	}
+
+	retryGeneration := int64(0)
+	for i := 0; i < 3; i++ {
+		generation, err := env.store.RegisterNode(ctx, model.Node{
+			ID: nodeID, Address: "127.0.0.1:9999", CPUCapacity: 1000,
+			MemoryCapacity: 512, Status: model.NodeReady,
+		}, identity, "lease-retry-owner")
+		if err != nil {
+			t.Fatalf("registration retry %d: %v", i, err)
+		}
+		if i == 0 {
+			retryGeneration = generation
+			if retryGeneration != finalGeneration+1 {
+				t.Fatalf("first retry generation = %d; want %d", retryGeneration, finalGeneration+1)
+			}
+		} else if generation != retryGeneration {
+			t.Fatalf("retry generation = %d; want stable generation %d", generation, retryGeneration)
+		}
+	}
+	if err := env.store.UpdateHeartbeat(ctx, nodeID, identity, retryGeneration-1, model.NodeReady, time.Now().UTC()); !errors.Is(err, store.ErrNodeLeaseStale) {
+		t.Fatalf("old heartbeat error = %v; want stale lease error", err)
+	}
+	if err := env.store.SetNodeStatus(ctx, nodeID, model.NodeUnhealthy); err != nil {
+		t.Fatalf("set unhealthy before stale heartbeat: %v", err)
+	}
+	if err := env.store.UpdateHeartbeat(ctx, nodeID, identity, retryGeneration-1, model.NodeReady, time.Now().UTC()); !errors.Is(err, store.ErrNodeLeaseStale) {
+		t.Fatalf("stale heartbeat error = %v; want stale lease error", err)
+	}
+	registered, err := env.store.GetNode(ctx, nodeID)
+	if err != nil {
+		t.Fatalf("get node after stale heartbeat: %v", err)
+	}
+	if registered.Status != model.NodeUnhealthy {
+		t.Fatalf("stale heartbeat changed status to %q; want UNHEALTHY", registered.Status)
+	}
+	if err := env.store.UpdateHeartbeat(ctx, nodeID, identity, retryGeneration, model.NodeReady, time.Now().UTC()); err != nil {
+		t.Fatalf("current heartbeat: %v", err)
 	}
 }
 
@@ -1035,44 +1271,56 @@ func integrationTLSConfig(t *testing.T) (*tls.Config, *tls.Config, integrationTL
 	if err != nil {
 		t.Fatalf("create integration CA: %v", err)
 	}
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate integration leaf key: %v", err)
+	caPath := filepath.Join(dir, "ca.pem")
+	writeIntegrationPEM(t, caPath, "CERTIFICATE", caDER)
+
+	issue := func(name string, serial int64, nodeID string) integrationTLSFiles {
+		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("generate integration leaf key for %s: %v", name, err)
+		}
+		leafTemplate := &x509.Certificate{
+			SerialNumber: big.NewInt(serial),
+			Subject:      pkix.Name{CommonName: "localhost"},
+			DNSNames:     []string{"localhost"},
+			IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+			NotBefore:    now.Add(-time.Minute),
+			NotAfter:     now.Add(time.Hour),
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		}
+		if nodeID != "" {
+			nodeURI, err := url.Parse("spiffe://mini-orchestrator/node/" + nodeID)
+			if err != nil {
+				t.Fatalf("parse node URI for %s: %v", nodeID, err)
+			}
+			leafTemplate.URIs = []*url.URL{nodeURI}
+		}
+		leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, &leafKey.PublicKey, caKey)
+		if err != nil {
+			t.Fatalf("create integration leaf for %s: %v", name, err)
+		}
+		leafKeyDER, err := x509.MarshalPKCS8PrivateKey(leafKey)
+		if err != nil {
+			t.Fatalf("marshal integration leaf key for %s: %v", name, err)
+		}
+		certPath := filepath.Join(dir, name+"-cert.pem")
+		keyPath := filepath.Join(dir, name+"-key.pem")
+		writeIntegrationPEM(t, certPath, "CERTIFICATE", leafDER)
+		writeIntegrationPEM(t, keyPath, "PRIVATE KEY", leafKeyDER)
+		return integrationTLSFiles{certificate: certPath, privateKey: keyPath, ca: caPath}
 	}
-	leafTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-		NotBefore:    now.Add(-time.Minute),
-		NotAfter:     now.Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, &leafKey.PublicKey, caKey)
-	if err != nil {
-		t.Fatalf("create integration leaf certificate: %v", err)
-	}
-	leafKeyDER, err := x509.MarshalPKCS8PrivateKey(leafKey)
-	if err != nil {
-		t.Fatalf("marshal integration leaf key: %v", err)
-	}
-	writeIntegrationPEM(t, filepath.Join(dir, "cert.pem"), "CERTIFICATE", leafDER)
-	writeIntegrationPEM(t, filepath.Join(dir, "key.pem"), "PRIVATE KEY", leafKeyDER)
-	writeIntegrationPEM(t, filepath.Join(dir, "ca.pem"), "CERTIFICATE", caDER)
-	serverTLS, clientTLS, err := transporttls.Load(
-		filepath.Join(dir, "cert.pem"),
-		filepath.Join(dir, "key.pem"),
-		filepath.Join(dir, "ca.pem"),
-	)
+
+	controlPlaneFiles := issue("control-plane", 2, "")
+	serverTLS, clientTLS, err := transporttls.Load(controlPlaneFiles.certificate, controlPlaneFiles.privateKey, controlPlaneFiles.ca)
 	if err != nil {
 		t.Fatalf("load integration mutual TLS configuration: %v", err)
 	}
-	return serverTLS, clientTLS, integrationTLSFiles{
-		certificate: filepath.Join(dir, "cert.pem"),
-		privateKey:  filepath.Join(dir, "key.pem"),
-		ca:          filepath.Join(dir, "ca.pem"),
+	controlPlaneFiles.nodes = map[string]integrationTLSFiles{
+		"worker-01": issue("worker-01", 3, "worker-01"),
+		"worker-02": issue("worker-02", 4, "worker-02"),
 	}
+	return serverTLS, clientTLS, controlPlaneFiles
 }
 
 func writeIntegrationPEM(t *testing.T, path, kind string, value []byte) {

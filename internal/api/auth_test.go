@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -77,6 +78,87 @@ func TestRequireBearerTokenFailsClosedWhenExpectedTokenIsEmpty(t *testing.T) {
 	}
 	if called {
 		t.Fatal("handler was called with no configured bearer token")
+	}
+}
+
+func TestParseNodeIdentity(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity string
+		wantID   string
+		wantErr  error
+	}{
+		{name: "valid", identity: "spiffe://mini-orchestrator/node/worker-01", wantID: "worker-01"},
+		{name: "missing URI", identity: "", wantErr: ErrMalformedNodeIdentity},
+		{name: "wrong scheme", identity: "https://mini-orchestrator/node/worker-01", wantErr: ErrMalformedNodeIdentity},
+		{name: "wrong trust domain", identity: "spiffe://example.org/node/worker-01", wantErr: ErrMalformedNodeIdentity},
+		{name: "missing node path", identity: "spiffe://mini-orchestrator/service/worker-01", wantErr: ErrMalformedNodeIdentity},
+		{name: "nested node path", identity: "spiffe://mini-orchestrator/node/team/worker-01", wantErr: ErrMalformedNodeIdentity},
+		{name: "invalid node character", identity: "spiffe://mini-orchestrator/node/worker 01", wantErr: ErrMalformedNodeIdentity},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotID, err := parseNodeIdentity(test.identity)
+			if test.wantErr != nil {
+				if err != test.wantErr {
+					t.Fatalf("error = %v; want %v", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseNodeIdentity: %v", err)
+			}
+			if gotID != test.wantID {
+				t.Fatalf("node ID = %q; want %q", gotID, test.wantID)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedNodeIdentity(t *testing.T) {
+	uri := func(value string) *url.URL {
+		parsed, err := url.Parse(value)
+		if err != nil {
+			t.Fatalf("parse URI: %v", err)
+		}
+		return parsed
+	}
+
+	missingLeaf := &x509.Certificate{}
+	duplicateLeaf := &x509.Certificate{URIs: []*url.URL{uri("spiffe://mini-orchestrator/node/worker-01"), uri("spiffe://mini-orchestrator/node/worker-02")}}
+	validLeaf := &x509.Certificate{URIs: []*url.URL{uri("spiffe://mini-orchestrator/node/worker-01")}}
+
+	tests := []struct {
+		name     string
+		tlsState *tls.ConnectionState
+		wantID   string
+		wantErr  error
+	}{
+		{name: "unverified TLS", tlsState: &tls.ConnectionState{}, wantErr: ErrUnverifiedNodeCertificate},
+		{name: "missing URI SAN", tlsState: &tls.ConnectionState{PeerCertificates: []*x509.Certificate{missingLeaf}, VerifiedChains: [][]*x509.Certificate{{missingLeaf}}}, wantErr: ErrMissingNodeIdentity},
+		{name: "duplicate URI SAN", tlsState: &tls.ConnectionState{PeerCertificates: []*x509.Certificate{duplicateLeaf}, VerifiedChains: [][]*x509.Certificate{{duplicateLeaf}}}, wantErr: ErrDuplicateNodeIdentity},
+		{name: "valid identity", tlsState: &tls.ConnectionState{PeerCertificates: []*x509.Certificate{validLeaf}, VerifiedChains: [][]*x509.Certificate{{validLeaf}}}, wantID: "worker-01"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/nodes/heartbeat", nil)
+			request.TLS = test.tlsState
+			gotID, err := authenticatedNodeIdentity(request)
+			if test.wantErr != nil {
+				if err != test.wantErr {
+					t.Fatalf("error = %v; want %v", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("authenticatedNodeIdentity: %v", err)
+			}
+			if gotID != test.wantID {
+				t.Fatalf("node ID = %q; want %q", gotID, test.wantID)
+			}
+		})
 	}
 }
 

@@ -8,8 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -158,10 +161,17 @@ func main() {
 		Token:   config.Token,
 	}
 
-	ctx := context.Background()
+	shutdownTimeout, err := httpconfig.ShutdownTimeoutFromEnv(os.Getenv)
+	if err != nil {
+		slog.Error("shutdown configuration is invalid", "error", err)
+		os.Exit(1)
+	}
+
+	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
 	registerCtx, cancel := context.WithTimeout(
-		ctx,
+		rootCtx,
 		5*time.Second,
 	)
 	defer cancel()
@@ -177,7 +187,12 @@ func main() {
 		"address", agent.Address,
 	)
 
-	go agent.RunHeartbeatLoop(ctx)
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Add(1)
+	go func() {
+		defer heartbeatWG.Done()
+		agent.RunHeartbeatLoop(rootCtx)
+	}()
 
 	server := &http.Server{
 		Addr:      config.ListenAddress,
@@ -193,9 +208,57 @@ func main() {
 		"advertised_address", agent.Address,
 	)
 
-	if err := server.ListenAndServeTLS("", ""); err != nil &&
-		err != http.ErrServerClosed {
-		slog.Error("node agent HTTP server failed", "node_id", agent.ID, "error", err)
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.ListenAndServeTLS("", "")
+	}()
+
+	shutdownRequested := false
+	var listenErr error
+	select {
+	case <-rootCtx.Done():
+		shutdownRequested = true
+		slog.Info("node agent shutdown started", "node_id", agent.ID)
+	case listenErr = <-serverErr:
+		if listenErr != nil && listenErr != http.ErrServerClosed {
+			slog.Error("node agent HTTP server failed", "node_id", agent.ID, "error", listenErr)
+		}
+	}
+
+	shutdownErr := httpconfig.ShutdownGracefully(server, shutdownTimeout)
+	if shutdownErr != nil {
+		shutdownRequested = false
+		slog.Error("node agent HTTP shutdown did not complete gracefully", "node_id", agent.ID, "error", shutdownErr)
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		heartbeatWG.Wait()
+		close(waitDone)
+	}()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer waitCancel()
+	heartbeatStopped := false
+	select {
+	case <-waitDone:
+		heartbeatStopped = true
+	case <-waitCtx.Done():
+		shutdownRequested = false
+		slog.Error("node agent heartbeat loop did not stop within shutdown timeout", "node_id", agent.ID)
+	}
+
+	if heartbeatStopped {
+		if err := dockerRuntime.Close(); err != nil {
+			shutdownRequested = false
+			slog.Error("node agent Docker client close failed", "node_id", agent.ID, "error", err)
+		}
+	}
+
+	if shutdownRequested && listenErr == nil {
+		slog.Info("node agent shutdown complete", "node_id", agent.ID)
+		return
+	}
+	if listenErr != nil && listenErr != http.ErrServerClosed {
 		os.Exit(1)
 	}
 }

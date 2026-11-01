@@ -11,10 +11,11 @@ import (
 )
 
 type createContainerRequest struct {
-	Name      string `json:"name"`
-	Image     string `json:"image"`
-	CPUMillis int    `json:"cpu_millis"`
-	MemoryMB  int    `json:"memory_mb"`
+	Name       string `json:"name"`
+	WorkloadID string `json:"workload_id"`
+	Image      string `json:"image"`
+	CPUMillis  int    `json:"cpu_millis"`
+	MemoryMB   int    `json:"memory_mb"`
 }
 
 type createContainerResponse struct {
@@ -41,6 +42,7 @@ func (a *Agent) CreateContainer(
 	}
 
 	if req.Name == "" ||
+		req.WorkloadID == "" ||
 		req.Image == "" ||
 		req.CPUMillis <= 0 ||
 		req.MemoryMB <= 0 {
@@ -55,14 +57,19 @@ func (a *Agent) CreateContainer(
 	container, err := a.Runtime.Create(
 		r.Context(),
 		runtime.ContainerConfig{
-			Name:      req.Name,
-			Image:     req.Image,
-			CPUMillis: req.CPUMillis,
-			MemoryMB:  req.MemoryMB,
+			Name:       req.Name,
+			WorkloadID: req.WorkloadID,
+			Image:      req.Image,
+			CPUMillis:  req.CPUMillis,
+			MemoryMB:   req.MemoryMB,
 		},
 	)
 	if err != nil {
 		slog.Error("container create failed", "container_name", req.Name, "error", err)
+		if errors.Is(err, runtime.ErrContainerConflict) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(
 			w,
 			"failed to create container",

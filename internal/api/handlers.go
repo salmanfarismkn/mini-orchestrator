@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -84,19 +85,22 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 
 type registerNodeRequest struct {
 	ID             string `json:"id"`
+	RegistrationID string `json:"registration_id"`
 	Address        string `json:"address"`
 	CPUCapacity    int    `json:"cpu_capacity_millis"`
 	MemoryCapacity int    `json:"memory_capacity_mb"`
 }
 
 type heartbeatRequest struct {
-	ID string `json:"id"`
+	ID              string `json:"id"`
+	LeaseGeneration int64  `json:"lease_generation"`
 }
 
 type heartbeatResponse struct {
-	ID        string    `json:"id"`
-	Status    string    `json:"status"`
-	Timestamp time.Time `json:"timestamp"`
+	ID              string    `json:"id"`
+	Status          string    `json:"status"`
+	LeaseGeneration int64     `json:"lease_generation"`
+	Timestamp       time.Time `json:"timestamp"`
 }
 
 type createServiceRequest struct {
@@ -190,6 +194,12 @@ func (s *Server) heartbeat(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	certificateNodeID, ok := nodeIdentityFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusForbidden, "authenticated node identity is required")
+		return
+	}
+
 	var req heartbeatRequest
 
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -201,41 +211,65 @@ func (s *Server) heartbeat(
 		writeError(w, http.StatusBadRequest, "node id is required")
 		return
 	}
+	if req.LeaseGeneration < 1 {
+		writeError(w, http.StatusBadRequest, "lease generation is required")
+		return
+	}
+	if req.ID != certificateNodeID {
+		writeError(w, http.StatusForbidden, "certificate identity does not match node id")
+		return
+	}
 
 	now := time.Now().UTC()
+	certificateIdentity := "spiffe://mini-orchestrator/node/" + certificateNodeID
 
 	if err := s.store.UpdateHeartbeat(
 		r.Context(),
 		req.ID,
+		certificateIdentity,
+		req.LeaseGeneration,
 		model.NodeReady,
 		now,
 	); err != nil {
-		http.Error(
-			w,
-			"failed to update heartbeat",
-			http.StatusNotFound,
-		)
+		switch {
+		case errors.Is(err, store.ErrNodeLeaseStale):
+			writeError(w, http.StatusConflict, "node lease generation is stale")
+		case errors.Is(err, store.ErrNodeIdentityNotBound):
+			writeError(w, http.StatusForbidden, "node identity is not enrolled")
+		case errors.Is(err, store.ErrNodeIdentityMismatch):
+			writeError(w, http.StatusForbidden, "certificate identity does not match enrolled node identity")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update heartbeat")
+		}
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
 	_ = json.NewEncoder(w).Encode(heartbeatResponse{
-		ID:        req.ID,
-		Status:    string(model.NodeReady),
-		Timestamp: now,
+		ID:              req.ID,
+		Status:          string(model.NodeReady),
+		LeaseGeneration: req.LeaseGeneration,
+		Timestamp:       now,
 	})
 }
 
 type registerNodeResponse struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
+	ID              string `json:"id"`
+	Status          string `json:"status"`
+	LeaseGeneration int64  `json:"lease_generation"`
 }
 
 func (s *Server) registerNode(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	certificateNodeID, ok := nodeIdentityFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusForbidden, "authenticated node identity is required")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req registerNodeRequest
 
@@ -248,6 +282,7 @@ func (s *Server) registerNode(
 	}
 
 	if req.ID == "" ||
+		req.RegistrationID == "" || len(req.RegistrationID) > 64 ||
 		req.Address == "" ||
 		req.CPUCapacity <= 0 ||
 		req.MemoryCapacity <= 0 {
@@ -255,7 +290,19 @@ func (s *Server) registerNode(
 		return
 	}
 
+	if req.ID != certificateNodeID {
+		writeError(w, http.StatusForbidden, "certificate identity does not match node id")
+		return
+	}
+	for _, r := range req.RegistrationID {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			writeError(w, http.StatusBadRequest, "invalid registration id")
+			return
+		}
+	}
+
 	now := time.Now().UTC()
+	certificateIdentity := "spiffe://mini-orchestrator/node/" + certificateNodeID
 
 	node := model.Node{
 		ID:             req.ID,
@@ -266,8 +313,18 @@ func (s *Server) registerNode(
 		LastHeartbeat:  now,
 	}
 
-	if err := s.store.RegisterNode(r.Context(), node); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to register node")
+	leaseGeneration, err := s.store.RegisterNode(r.Context(), node, certificateIdentity, req.RegistrationID)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNodeLeaseStale):
+			writeError(w, http.StatusConflict, "node registration is stale")
+		case errors.Is(err, store.ErrNodeIdentityNotBound):
+			writeError(w, http.StatusForbidden, "node identity is not enrolled")
+		case errors.Is(err, store.ErrNodeIdentityMismatch):
+			writeError(w, http.StatusForbidden, "certificate identity does not match enrolled node identity")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to register node")
+		}
 		return
 	}
 
@@ -275,8 +332,9 @@ func (s *Server) registerNode(
 	w.WriteHeader(http.StatusCreated)
 
 	_ = json.NewEncoder(w).Encode(registerNodeResponse{
-		ID:     node.ID,
-		Status: string(node.Status),
+		ID:              node.ID,
+		Status:          string(node.Status),
+		LeaseGeneration: leaseGeneration,
 	})
 }
 

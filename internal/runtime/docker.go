@@ -11,14 +11,38 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 var ErrContainerNotFound = errors.New("container not found")
+var ErrContainerConflict = errors.New("container conflicts with workload configuration")
+
+const workloadLabel = "mini-orchestrator.workload-id"
+
+type dockerClient interface {
+	ImageInspectWithRaw(ctx context.Context, imageID string) (types.ImageInspect, []byte, error)
+	ImagePull(ctx context.Context, refStr string, options types.ImagePullOptions) (io.ReadCloser, error)
+	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
+	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
+	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
+	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
+	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
+	ContainerList(ctx context.Context, options container.ListOptions) ([]types.Container, error)
+	ContainerStats(ctx context.Context, containerID string, stream bool) (types.ContainerStats, error)
+}
 
 type DockerRuntime struct {
-	client *client.Client
+	client dockerClient
+}
+
+func (d *DockerRuntime) Close() error {
+	if closer, ok := d.client.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func NewDockerRuntime() (*DockerRuntime, error) {
@@ -39,62 +63,97 @@ func (d *DockerRuntime) Create(
 	ctx context.Context,
 	config ContainerConfig,
 ) (Container, error) {
-	_, _, err := d.client.ImageInspectWithRaw(ctx, config.Image)
+	if config.WorkloadID == "" {
+		return Container{}, fmt.Errorf("workload ID is required")
+	}
 
+	info, err := d.client.ContainerInspect(ctx, config.Name)
+	if err == nil {
+		return d.adoptContainer(info, config)
+	}
+	if !errdefs.IsNotFound(err) {
+		return Container{}, fmt.Errorf("inspect container %q: %w", config.Name, err)
+	}
+
+	_, _, err = d.client.ImageInspectWithRaw(ctx, config.Image)
 	if err != nil {
-		reader, err := d.client.ImagePull(
-			ctx,
-			config.Image,
-			types.ImagePullOptions{},
-		)
-		if err != nil {
-			return Container{}, fmt.Errorf(
-				"pull image %q: %w",
-				config.Image,
-				err,
-			)
+		reader, pullErr := d.client.ImagePull(ctx, config.Image, types.ImagePullOptions{})
+		if pullErr != nil {
+			return Container{}, fmt.Errorf("pull image %q: %w", config.Image, pullErr)
 		}
 		defer reader.Close()
-
 		if _, copyErr := io.Copy(io.Discard, reader); copyErr != nil {
-			return Container{}, fmt.Errorf(
-				"pull image %q: %w",
-				config.Image,
-				copyErr,
-			)
+			return Container{}, fmt.Errorf("pull image %q: %w", config.Image, copyErr)
 		}
 	}
 
 	resp, err := d.client.ContainerCreate(
 		ctx,
 		&container.Config{
-			Image:  config.Image,
-			Labels: map[string]string{"mini-orchestrator": "true"},
-		},
-		&container.HostConfig{
-			Resources: container.Resources{
-				NanoCPUs: int64(config.CPUMillis) * 1_000_000,
-				Memory:   int64(config.MemoryMB) * 1024 * 1024,
+			Image: config.Image,
+			Labels: map[string]string{
+				"mini-orchestrator": "true",
+				workloadLabel:       config.WorkloadID,
 			},
 		},
+		&container.HostConfig{Resources: container.Resources{
+			NanoCPUs: int64(config.CPUMillis) * 1_000_000,
+			Memory:   int64(config.MemoryMB) * 1024 * 1024,
+		}},
 		nil,
 		nil,
 		config.Name,
 	)
-
 	if err != nil {
-		return Container{}, fmt.Errorf(
-			"create container: %w",
-			err,
-		)
+		if errdefs.IsConflict(err) {
+			info, inspectErr := d.client.ContainerInspect(ctx, config.Name)
+			if inspectErr == nil {
+				container, adoptErr := d.adoptContainer(info, config)
+				if adoptErr == nil {
+					return container, nil
+				}
+				return Container{}, adoptErr
+			}
+			return Container{}, fmt.Errorf("%w: name %q is in use and could not be inspected: %v", ErrContainerConflict, config.Name, inspectErr)
+		}
+		return Container{}, fmt.Errorf("create container: %w", err)
 	}
 
-	return Container{
-		ID:     resp.ID,
-		Name:   config.Name,
-		Image:  config.Image,
-		Status: "created",
-	}, nil
+	return Container{ID: resp.ID, Name: config.Name, Image: config.Image, Status: "created"}, nil
+}
+
+func (d *DockerRuntime) adoptContainer(info types.ContainerJSON, config ContainerConfig) (Container, error) {
+	if info.Config == nil {
+		return Container{}, fmt.Errorf("%w: container %q has no configuration", ErrContainerConflict, config.Name)
+	}
+	if info.Config.Labels["mini-orchestrator"] != "true" {
+		return Container{}, fmt.Errorf("%w: container %q is not orchestrator-managed", ErrContainerConflict, config.Name)
+	}
+	if actual := info.Config.Labels[workloadLabel]; actual != config.WorkloadID {
+		return Container{}, fmt.Errorf("%w: container %q workload label is %q, want %q", ErrContainerConflict, config.Name, actual, config.WorkloadID)
+	}
+	if info.Config.Image != config.Image {
+		return Container{}, fmt.Errorf("%w: container %q image is %q, want %q", ErrContainerConflict, config.Name, info.Config.Image, config.Image)
+	}
+	if info.HostConfig == nil {
+		return Container{}, fmt.Errorf("%w: container %q has no host configuration", ErrContainerConflict, config.Name)
+	}
+	wantNanoCPUs := int64(config.CPUMillis) * 1_000_000
+	wantMemory := int64(config.MemoryMB) * 1024 * 1024
+	if info.HostConfig.NanoCPUs != wantNanoCPUs || info.HostConfig.Memory != wantMemory {
+		return Container{}, fmt.Errorf("%w: container %q CPU/memory limits do not match workload", ErrContainerConflict, config.Name)
+	}
+
+	name := strings.TrimPrefix(info.Name, "/")
+	if name != config.Name {
+		return Container{}, fmt.Errorf("%w: inspected container name is %q, want %q", ErrContainerConflict, name, config.Name)
+	}
+
+	status := "unknown"
+	if info.State != nil {
+		status = info.State.Status
+	}
+	return Container{ID: info.ID, Name: config.Name, Image: config.Image, Status: status}, nil
 }
 
 func (d *DockerRuntime) Start(

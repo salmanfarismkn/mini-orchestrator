@@ -31,10 +31,11 @@ func NewClient(
 }
 
 type CreateContainerRequest struct {
-	Name      string `json:"name"`
-	Image     string `json:"image"`
-	CPUMillis int    `json:"cpu_millis"`
-	MemoryMB  int    `json:"memory_mb"`
+	Name       string `json:"name"`
+	WorkloadID string `json:"workload_id"`
+	Image      string `json:"image"`
+	CPUMillis  int    `json:"cpu_millis"`
+	MemoryMB   int    `json:"memory_mb"`
 }
 
 type CreateContainerResponse struct {
@@ -50,10 +51,11 @@ func (c *Client) CreateContainer(
 	config runtime.ContainerConfig,
 ) (runtime.Container, error) {
 	body, err := json.Marshal(CreateContainerRequest{
-		Name:      config.Name,
-		Image:     config.Image,
-		CPUMillis: config.CPUMillis,
-		MemoryMB:  config.MemoryMB,
+		Name:       config.Name,
+		WorkloadID: config.WorkloadID,
+		Image:      config.Image,
+		CPUMillis:  config.CPUMillis,
+		MemoryMB:   config.MemoryMB,
 	})
 	if err != nil {
 		return runtime.Container{}, fmt.Errorf("encode create request: %w", err)
@@ -81,6 +83,9 @@ func (c *Client) CreateContainer(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusConflict {
+			return runtime.Container{}, fmt.Errorf("%w: node returned container conflict", runtime.ErrContainerConflict)
+		}
 		return runtime.Container{}, fmt.Errorf(
 			"node returned status %d",
 			resp.StatusCode,
