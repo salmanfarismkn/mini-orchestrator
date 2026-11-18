@@ -21,6 +21,7 @@ var ErrContainerNotFound = errors.New("container not found")
 var ErrContainerConflict = errors.New("container conflicts with workload configuration")
 
 const workloadLabel = "mini-orchestrator.workload-id"
+const nodeLabel = "mini-orchestrator.node-id"
 
 type dockerClient interface {
 	ImageInspectWithRaw(ctx context.Context, imageID string) (types.ImageInspect, []byte, error)
@@ -63,8 +64,8 @@ func (d *DockerRuntime) Create(
 	ctx context.Context,
 	config ContainerConfig,
 ) (Container, error) {
-	if config.WorkloadID == "" {
-		return Container{}, fmt.Errorf("workload ID is required")
+	if config.WorkloadID == "" || config.NodeID == "" {
+		return Container{}, fmt.Errorf("workload ID and node ID are required")
 	}
 
 	info, err := d.client.ContainerInspect(ctx, config.Name)
@@ -94,6 +95,7 @@ func (d *DockerRuntime) Create(
 			Labels: map[string]string{
 				"mini-orchestrator": "true",
 				workloadLabel:       config.WorkloadID,
+				nodeLabel:           config.NodeID,
 			},
 		},
 		&container.HostConfig{Resources: container.Resources{
@@ -119,7 +121,14 @@ func (d *DockerRuntime) Create(
 		return Container{}, fmt.Errorf("create container: %w", err)
 	}
 
-	return Container{ID: resp.ID, Name: config.Name, Image: config.Image, Status: "created"}, nil
+	return Container{
+		ID:         resp.ID,
+		Name:       config.Name,
+		Image:      config.Image,
+		Status:     "created",
+		WorkloadID: config.WorkloadID,
+		NodeID:     config.NodeID,
+	}, nil
 }
 
 func (d *DockerRuntime) adoptContainer(info types.ContainerJSON, config ContainerConfig) (Container, error) {
@@ -131,6 +140,9 @@ func (d *DockerRuntime) adoptContainer(info types.ContainerJSON, config Containe
 	}
 	if actual := info.Config.Labels[workloadLabel]; actual != config.WorkloadID {
 		return Container{}, fmt.Errorf("%w: container %q workload label is %q, want %q", ErrContainerConflict, config.Name, actual, config.WorkloadID)
+	}
+	if actual := info.Config.Labels[nodeLabel]; actual != config.NodeID {
+		return Container{}, fmt.Errorf("%w: container %q node label does not match", ErrContainerConflict, config.Name)
 	}
 	if info.Config.Image != config.Image {
 		return Container{}, fmt.Errorf("%w: container %q image is %q, want %q", ErrContainerConflict, config.Name, info.Config.Image, config.Image)
@@ -153,13 +165,24 @@ func (d *DockerRuntime) adoptContainer(info types.ContainerJSON, config Containe
 	if info.State != nil {
 		status = info.State.Status
 	}
-	return Container{ID: info.ID, Name: config.Name, Image: config.Image, Status: status}, nil
+	return Container{
+		ID:         info.ID,
+		Name:       config.Name,
+		Image:      config.Image,
+		Status:     status,
+		WorkloadID: info.Config.Labels[workloadLabel],
+		NodeID:     info.Config.Labels[nodeLabel],
+	}, nil
 }
 
 func (d *DockerRuntime) Start(
 	ctx context.Context,
 	containerID string,
+	nodeID string,
 ) error {
+	if _, err := d.inspectOwnedContainer(ctx, containerID, nodeID); err != nil {
+		return err
+	}
 	info, err := d.client.ContainerInspect(ctx, containerID)
 	if err == nil && info.State != nil && info.State.Status == "running" {
 		return nil
@@ -190,7 +213,11 @@ func (d *DockerRuntime) Start(
 func (d *DockerRuntime) Stop(
 	ctx context.Context,
 	containerID string,
+	nodeID string,
 ) error {
+	if _, err := d.inspectOwnedContainer(ctx, containerID, nodeID); err != nil {
+		return err
+	}
 	if err := d.client.ContainerStop(
 		ctx,
 		containerID,
@@ -205,7 +232,11 @@ func (d *DockerRuntime) Stop(
 func (d *DockerRuntime) Remove(
 	ctx context.Context,
 	containerID string,
+	nodeID string,
 ) error {
+	if _, err := d.inspectOwnedContainer(ctx, containerID, nodeID); err != nil {
+		return err
+	}
 	if err := d.client.ContainerRemove(
 		ctx,
 		containerID,
@@ -222,10 +253,11 @@ func (d *DockerRuntime) Remove(
 func (d *DockerRuntime) Inspect(
 	ctx context.Context,
 	containerID string,
+	nodeID string,
 ) (Container, error) {
-	info, err := d.client.ContainerInspect(ctx, containerID)
+	info, err := d.inspectOwnedContainer(ctx, containerID, nodeID)
 	if err != nil {
-		return Container{}, containerOperationError("inspect", containerID, err)
+		return Container{}, err
 	}
 
 	status := "unknown"
@@ -241,11 +273,27 @@ func (d *DockerRuntime) Inspect(
 	}
 
 	return Container{
-		ID:     info.ID,
-		Name:   name,
-		Image:  info.Config.Image,
-		Status: status,
+		ID:         info.ID,
+		Name:       name,
+		Image:      info.Config.Image,
+		Status:     status,
+		WorkloadID: info.Config.Labels[workloadLabel],
+		NodeID:     info.Config.Labels[nodeLabel],
 	}, nil
+}
+
+func (d *DockerRuntime) inspectOwnedContainer(ctx context.Context, containerID, nodeID string) (types.ContainerJSON, error) {
+	info, err := d.client.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return types.ContainerJSON{}, containerOperationError("inspect", containerID, err)
+	}
+	if nodeID == "" || info.Config == nil ||
+		info.Config.Labels["mini-orchestrator"] != "true" ||
+		info.Config.Labels[workloadLabel] == "" ||
+		info.Config.Labels[nodeLabel] != nodeID {
+		return types.ContainerJSON{}, fmt.Errorf("%w: expected node %q", ErrContainerNotOwned, nodeID)
+	}
+	return info, nil
 }
 
 func containerOperationError(operation, containerID string, err error) error {
@@ -274,6 +322,7 @@ func isOrchestratorManagedContainer(c types.Container) bool {
 
 func (d *DockerRuntime) List(
 	ctx context.Context,
+	nodeID string,
 ) ([]Container, error) {
 	containers, err := d.client.ContainerList(
 		ctx,
@@ -292,7 +341,8 @@ func (d *DockerRuntime) List(
 	result := make([]Container, 0, len(containers))
 
 	for _, c := range containers {
-		if !isOrchestratorManagedContainer(c) {
+		if !isOrchestratorManagedContainer(c) || c.Labels[nodeLabel] != nodeID ||
+			c.Labels[workloadLabel] == "" {
 			continue
 		}
 
@@ -307,10 +357,12 @@ func (d *DockerRuntime) List(
 		}
 
 		result = append(result, Container{
-			ID:     c.ID,
-			Name:   name,
-			Image:  c.Image,
-			Status: c.State,
+			ID:         c.ID,
+			Name:       name,
+			Image:      c.Image,
+			Status:     c.State,
+			WorkloadID: c.Labels[workloadLabel],
+			NodeID:     c.Labels[nodeLabel],
 		})
 	}
 
@@ -342,7 +394,11 @@ func calculateCPUUsage(
 func (d *DockerRuntime) Stats(
 	ctx context.Context,
 	containerID string,
+	nodeID string,
 ) (ContainerStats, error) {
+	if _, err := d.inspectOwnedContainer(ctx, containerID, nodeID); err != nil {
+		return ContainerStats{}, err
+	}
 	response, err := d.client.ContainerStats(
 		ctx,
 		containerID,

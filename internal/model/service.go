@@ -11,6 +11,13 @@ const (
 	DeploymentFailed      DeploymentStatus = "FAILED"
 )
 
+type DeploymentFailureReason string
+
+const (
+	DeploymentFailureWorkloadFailed DeploymentFailureReason = "replacement_workload_failed"
+	DeploymentFailureTimeout        DeploymentFailureReason = "deployment_timeout"
+)
+
 type Service struct {
 	ID                string
 	Name              string
@@ -23,8 +30,9 @@ type Service struct {
 	MaxSurge       int
 	MaxUnavailable int
 
-	DeploymentStatus    DeploymentStatus
-	DeploymentStartedAt *time.Time
+	DeploymentStatus        DeploymentStatus
+	DeploymentFailureReason DeploymentFailureReason
+	DeploymentStartedAt     *time.Time
 
 	Autoscaling             AutoscalingConfig
 	AutoscalingLastScaledAt *time.Time

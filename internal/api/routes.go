@@ -11,7 +11,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.Handle(
 		"GET /metrics",
-		s.metrics.Handler(),
+		RequireBearerToken(s.operatorToken, s.metrics.Handler()),
 	)
 
 	mux.Handle(
@@ -31,23 +31,43 @@ func (s *Server) Routes() http.Handler {
 	)
 
 	mux.Handle(
+		"GET /nodes/{id}",
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.getNode)),
+	)
+
+	mux.Handle(
+		"POST /nodes/{id}/drain",
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.drainNode)),
+	)
+
+	mux.Handle(
+		"POST /nodes/{id}/reactivate",
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.reactivateNode)),
+	)
+
+	mux.Handle(
 		"POST /services",
-		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.createService)),
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.createService)),
 	)
 
 	mux.Handle(
 		"GET /services/{id}",
-		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.getService)),
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.getService)),
+	)
+
+	mux.Handle(
+		"GET /services/{id}/deployment",
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.getDeploymentOperationalStatus)),
 	)
 
 	mux.Handle(
 		"PUT /services/{id}",
-		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.updateService)),
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.updateService)),
 	)
 
 	mux.Handle(
 		"DELETE /services/{id}",
-		RequireBearerToken(s.nodeToken, http.HandlerFunc(s.deleteService)),
+		RequireBearerToken(s.operatorToken, http.HandlerFunc(s.deleteService)),
 	)
 
 	mux.Handle("GET /healthz", observability.HealthHandler())

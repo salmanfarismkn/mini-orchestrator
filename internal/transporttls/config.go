@@ -11,6 +11,8 @@ const (
 	CertFileEnv = "ORCHESTRATOR_TLS_CERT_FILE"
 	KeyFileEnv  = "ORCHESTRATOR_TLS_KEY_FILE"
 	CAFileEnv   = "ORCHESTRATOR_TLS_CA_FILE"
+
+	ControlPlaneCertificateIdentity = "spiffe://mini-orchestrator/control-plane"
 )
 
 func LoadFromEnv() (*tls.Config, *tls.Config, error) {
@@ -74,4 +76,24 @@ func ValidateServerName(config *tls.Config, serverName string) error {
 		return fmt.Errorf("TLS server certificate does not cover %q: %w", serverName, err)
 	}
 	return nil
+}
+
+func ValidateURIIdentity(config *tls.Config, identity string) error {
+	if config == nil || len(config.Certificates) == 0 ||
+		len(config.Certificates[0].Certificate) == 0 {
+		return fmt.Errorf("TLS certificate is not configured")
+	}
+	certificate, err := x509.ParseCertificate(config.Certificates[0].Certificate[0])
+	if err != nil {
+		return fmt.Errorf("parse TLS certificate: %w", err)
+	}
+	if len(certificate.URIs) != 1 || certificate.URIs[0] == nil ||
+		certificate.URIs[0].String() != identity {
+		return fmt.Errorf("TLS certificate must have URI identity %q", identity)
+	}
+	return nil
+}
+
+func NodeCertificateIdentity(nodeID string) string {
+	return "spiffe://mini-orchestrator/node/" + nodeID
 }

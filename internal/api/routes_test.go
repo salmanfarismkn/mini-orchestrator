@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mini-orchestrator/internal/observability"
 )
 
 type readinessFunc func(context.Context) error
@@ -17,7 +19,7 @@ func (f readinessFunc) Ping(ctx context.Context) error {
 }
 
 func TestServiceManagementRoutesRequireBearerToken(t *testing.T) {
-	handler := (&Server{nodeToken: "route-test-token"}).Routes()
+	handler := (&Server{operatorToken: "route-test-token"}).Routes()
 	for _, route := range []struct {
 		method string
 		path   string
@@ -25,6 +27,7 @@ func TestServiceManagementRoutesRequireBearerToken(t *testing.T) {
 	}{
 		{method: http.MethodPost, path: "/services", body: `{}`},
 		{method: http.MethodGet, path: "/services/demo"},
+		{method: http.MethodGet, path: "/services/demo/deployment"},
 		{method: http.MethodPut, path: "/services/demo", body: `{}`},
 		{method: http.MethodDelete, path: "/services/demo"},
 	} {
@@ -39,8 +42,83 @@ func TestServiceManagementRoutesRequireBearerToken(t *testing.T) {
 	}
 }
 
+func TestMetricsRouteRequiresBearerToken(t *testing.T) {
+	handler := (&Server{operatorToken: "route-test-token"}).Routes()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d; want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestMetricsRouteAcceptsBearerToken(t *testing.T) {
+	handler := (&Server{operatorToken: "route-test-token", metrics: &observability.Metrics{}}).Routes()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request.Header.Set("Authorization", "Bearer route-test-token")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d; want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestNodeDrainRoutesRequireBearerToken(t *testing.T) {
+	handler := (&Server{
+		nodeToken:     "node-route-test-token",
+		operatorToken: "route-test-token",
+	}).Routes()
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/nodes/node-1"},
+		{method: http.MethodPost, path: "/nodes/node-1/drain"},
+		{method: http.MethodPost, path: "/nodes/node-1/reactivate"},
+	} {
+		request := httptest.NewRequest(route.method, route.path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("route %s %s status = %d; want %d", route.method, route.path, response.Code, http.StatusUnauthorized)
+		}
+	}
+}
+
+func TestNodeTokenCannotAccessOperatorRoutes(t *testing.T) {
+	handler := (&Server{
+		nodeToken:     "node-route-test-token",
+		operatorToken: "route-test-token",
+	}).Routes()
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/nodes/node-1"},
+		{method: http.MethodPost, path: "/nodes/node-1/drain"},
+		{method: http.MethodPost, path: "/nodes/node-1/reactivate"},
+		{method: http.MethodPost, path: "/services"},
+		{method: http.MethodGet, path: "/services/demo"},
+		{method: http.MethodGet, path: "/metrics"},
+	} {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			request := httptest.NewRequest(route.method, route.path, strings.NewReader(`{}`))
+			request.Header.Set("Authorization", "Bearer node-route-test-token")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d; want %d", response.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
 func TestServiceRouteAuthorizedRequestsReachHandler(t *testing.T) {
-	handler := (&Server{nodeToken: "route-test-token"}).Routes()
+	handler := (&Server{operatorToken: "route-test-token"}).Routes()
 	request := httptest.NewRequest(http.MethodPost, "/services", strings.NewReader(`{}`))
 	request.Header.Set("Authorization", "Bearer route-test-token")
 	response := httptest.NewRecorder()
@@ -64,6 +142,23 @@ func TestServiceManagementRoutesFailClosedWithoutConfiguredToken(t *testing.T) {
 
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d; want %d", response.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServiceUpdateRejectsUnknownFields(t *testing.T) {
+	handler := (&Server{operatorToken: "route-test-token"}).Routes()
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/services/demo",
+		strings.NewReader(`{"name":"demo","image":"nginx","replicas":1,"cpu_request_millis":1,"memory_request_mb":1,"unsupported":true}`),
+	)
+	request.Header.Set("Authorization", "Bearer route-test-token")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want %d", response.Code, http.StatusBadRequest)
 	}
 }
 

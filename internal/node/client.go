@@ -3,17 +3,23 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"mini-orchestrator/internal/runtime"
+	"mini-orchestrator/internal/transporttls"
 )
 
 type Client struct {
-	httpClient *http.Client
-	token      string
+	httpClient  *http.Client
+	token       string
+	mu          sync.Mutex
+	nodeClients map[string]*http.Client
 }
 
 func NewClient(
@@ -23,10 +29,14 @@ func NewClient(
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	if httpClient.Transport == nil {
+		httpClient.Transport = http.DefaultTransport.(*http.Transport).Clone()
+	}
 
 	return &Client{
-		httpClient: httpClient,
-		token:      token,
+		httpClient:  httpClient,
+		token:       token,
+		nodeClients: make(map[string]*http.Client),
 	}
 }
 
@@ -47,6 +57,7 @@ type CreateContainerResponse struct {
 
 func (c *Client) CreateContainer(
 	ctx context.Context,
+	nodeID string,
 	nodeAddress string,
 	config runtime.ContainerConfig,
 ) (runtime.Container, error) {
@@ -75,8 +86,9 @@ func (c *Client) CreateContainer(
 		"Bearer "+c.token,
 	)
 	req.Header.Set("Content-Type", "application/json")
+	c.setTargetNode(req, nodeID)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req, nodeID)
 	if err != nil {
 		return runtime.Container{}, fmt.Errorf("send create request: %w", err)
 	}
@@ -111,6 +123,7 @@ func (c *Client) CreateContainer(
 
 func (c *Client) StartContainer(
 	ctx context.Context,
+	nodeID string,
 	nodeAddress string,
 	containerID string,
 ) error {
@@ -127,7 +140,8 @@ func (c *Client) StartContainer(
 		"Authorization",
 		"Bearer "+c.token,
 	)
-	resp, err := c.httpClient.Do(req)
+	c.setTargetNode(req, nodeID)
+	resp, err := c.do(req, nodeID)
 	if err != nil {
 		return fmt.Errorf("send start request: %w", err)
 	}
@@ -145,6 +159,7 @@ func (c *Client) StartContainer(
 
 func (c *Client) ListContainers(
 	ctx context.Context,
+	nodeID string,
 	nodeAddress string,
 ) ([]runtime.Container, error) {
 	req, err := http.NewRequestWithContext(
@@ -160,7 +175,8 @@ func (c *Client) ListContainers(
 		"Authorization",
 		"Bearer "+c.token,
 	)
-	resp, err := c.httpClient.Do(req)
+	c.setTargetNode(req, nodeID)
+	resp, err := c.do(req, nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("send list containers request: %w", err)
 	}
@@ -187,6 +203,7 @@ func (c *Client) ListContainers(
 
 func (c *Client) StopContainer(
 	ctx context.Context,
+	nodeID string,
 	nodeAddress string,
 	containerID string,
 ) error {
@@ -203,7 +220,8 @@ func (c *Client) StopContainer(
 		"Authorization",
 		"Bearer "+c.token,
 	)
-	resp, err := c.httpClient.Do(req)
+	c.setTargetNode(req, nodeID)
+	resp, err := c.do(req, nodeID)
 	if err != nil {
 		return fmt.Errorf("send stop request: %w", err)
 	}
@@ -221,6 +239,7 @@ func (c *Client) StopContainer(
 
 func (c *Client) DeleteContainer(
 	ctx context.Context,
+	nodeID string,
 	nodeAddress string,
 	containerID string,
 ) error {
@@ -237,7 +256,8 @@ func (c *Client) DeleteContainer(
 		"Authorization",
 		"Bearer "+c.token,
 	)
-	resp, err := c.httpClient.Do(req)
+	c.setTargetNode(req, nodeID)
+	resp, err := c.do(req, nodeID)
 	if err != nil {
 		return fmt.Errorf("send delete request: %w", err)
 	}
@@ -255,6 +275,7 @@ func (c *Client) DeleteContainer(
 
 func (c *Client) GetContainer(
 	ctx context.Context,
+	nodeID string,
 	nodeAddress string,
 	containerID string,
 ) (runtime.Container, error) {
@@ -274,7 +295,8 @@ func (c *Client) GetContainer(
 		"Authorization",
 		"Bearer "+c.token,
 	)
-	resp, err := c.httpClient.Do(req)
+	c.setTargetNode(req, nodeID)
+	resp, err := c.do(req, nodeID)
 	if err != nil {
 		return runtime.Container{}, fmt.Errorf(
 			"send inspect request: %w",
@@ -304,6 +326,7 @@ func (c *Client) GetContainer(
 
 func (c *Client) GetContainerStats(
 	ctx context.Context,
+	nodeID string,
 	nodeAddress string,
 	containerID string,
 ) (runtime.ContainerStats, error) {
@@ -325,8 +348,9 @@ func (c *Client) GetContainerStats(
 		"Authorization",
 		"Bearer "+c.token,
 	)
+	c.setTargetNode(req, nodeID)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req, nodeID)
 	if err != nil {
 		return runtime.ContainerStats{}, fmt.Errorf(
 			"send stats request: %w",
@@ -352,4 +376,72 @@ func (c *Client) GetContainerStats(
 	}
 
 	return stats, nil
+}
+
+func (c *Client) setTargetNode(req *http.Request, nodeID string) {
+	req.Header.Set(targetNodeHeader, nodeID)
+}
+
+func (c *Client) do(req *http.Request, nodeID string) (*http.Response, error) {
+	client, err := c.clientForNode(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
+}
+
+func (c *Client) clientForNode(nodeID string) (*http.Client, error) {
+	if nodeID == "" {
+		return nil, errors.New("target node ID is required")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if client, ok := c.nodeClients[nodeID]; ok {
+		return client, nil
+	}
+
+	baseTransport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("node client requires an HTTP transport that supports TLS identity verification")
+	}
+	transport := baseTransport.Clone()
+	tlsConfig := transport.TLSClientConfig
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else {
+		tlsConfig = tlsConfig.Clone()
+	}
+	previousVerify := tlsConfig.VerifyConnection
+	expectedIdentity := transporttls.NodeCertificateIdentity(nodeID)
+	tlsConfig.InsecureSkipVerify = false
+	tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+		if previousVerify != nil {
+			if err := previousVerify(state); err != nil {
+				return err
+			}
+		}
+		if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) == 0 {
+			return errors.New("node server certificate was not verified")
+		}
+		leaf := state.VerifiedChains[0][0]
+		if len(leaf.URIs) != 1 || leaf.URIs[0] == nil ||
+			leaf.URIs[0].String() != expectedIdentity {
+			return fmt.Errorf("node server certificate identity does not match target node %q", nodeID)
+		}
+		return nil
+	}
+	transport.TLSClientConfig = tlsConfig
+
+	client := *c.httpClient
+	client.Transport = transport
+	c.nodeClients[nodeID] = &client
+	return &client, nil
+}
+
+func (c *Client) CloseIdleConnections() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, client := range c.nodeClients {
+		client.CloseIdleConnections()
+	}
 }

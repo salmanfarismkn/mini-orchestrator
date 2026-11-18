@@ -39,5 +39,5 @@ func (a *Agent) Routes() http.Handler {
 		"GET /containers/{id}/stats",
 		a.stats,
 	)
-	return mux
+	return RequireControlPlaneIdentity(a.ID, mux)
 }

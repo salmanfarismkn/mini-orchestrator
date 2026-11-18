@@ -2,11 +2,16 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"mini-orchestrator/internal/model"
 )
+
+var ErrInvalidDeploymentTransition = errors.New("invalid deployment state transition")
+var ErrServiceNotFound = errors.New("service not found")
 
 func (p *Postgres) CreateService(
 	ctx context.Context,
@@ -24,6 +29,7 @@ func (p *Postgres) CreateService(
             max_surge,
             max_unavailable,
             deployment_status,
+            deployment_failure_reason,
             deployment_started_at,
             autoscaling_enabled,
             autoscaling_min_replicas,
@@ -39,7 +45,7 @@ func (p *Postgres) CreateService(
             updated_at
         )
         VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
         )
     `,
 		service.ID,
@@ -52,6 +58,7 @@ func (p *Postgres) CreateService(
 		service.MaxSurge,
 		service.MaxUnavailable,
 		&service.DeploymentStatus,
+		&service.DeploymentFailureReason,
 		&service.DeploymentStartedAt,
 		service.Autoscaling.Enabled,
 		service.Autoscaling.MinReplicas,
@@ -90,6 +97,7 @@ func (p *Postgres) GetService(
             max_surge,
             max_unavailable,
             deployment_status,
+            deployment_failure_reason,
             deployment_started_at,
             autoscaling_enabled,
             autoscaling_min_replicas,
@@ -120,6 +128,7 @@ func (p *Postgres) GetService(
 		&service.MaxSurge,
 		&service.MaxUnavailable,
 		&service.DeploymentStatus,
+		&service.DeploymentFailureReason,
 		&service.DeploymentStartedAt,
 		&service.Autoscaling.Enabled,
 		&service.Autoscaling.MinReplicas,
@@ -154,6 +163,8 @@ func (p *Postgres) UpdateService(
 			desired_replicas = $3,
 			cpu_request_millis = $4,
 			memory_request_mb = $5,
+			max_surge = $8,
+			max_unavailable = $9,
 			deployment_version =
 				CASE
 					WHEN image <> $2::VARCHAR(512)
@@ -165,6 +176,12 @@ func (p *Postgres) UpdateService(
 					WHEN image <> $2::VARCHAR(512)
 					THEN $7
 					ELSE deployment_status
+				END,
+			deployment_failure_reason =
+				CASE
+					WHEN image <> $2::VARCHAR(512)
+					THEN ''
+					ELSE deployment_failure_reason
 				END,
 			deployment_started_at =
 				CASE
@@ -182,6 +199,8 @@ func (p *Postgres) UpdateService(
 		service.MemoryRequestMB,
 		service.ID,
 		model.DeploymentProgressing,
+		service.MaxSurge,
+		service.MaxUnavailable,
 	)
 
 	if err != nil {
@@ -204,6 +223,7 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
             max_surge,
             max_unavailable,
             deployment_status,
+            deployment_failure_reason,
             deployment_started_at,
             autoscaling_enabled,
             autoscaling_min_replicas,
@@ -241,6 +261,7 @@ func (p *Postgres) ListServices(ctx context.Context) ([]model.Service, error) {
 			&service.MaxSurge,
 			&service.MaxUnavailable,
 			&service.DeploymentStatus,
+			&service.DeploymentFailureReason,
 			&service.DeploymentStartedAt,
 			&service.Autoscaling.Enabled,
 			&service.Autoscaling.MinReplicas,
@@ -279,6 +300,7 @@ func (p *Postgres) StartDeployment(
 		SET
 			deployment_version = $1,
 			deployment_status = $2,
+			deployment_failure_reason = '',
 			deployment_started_at = $3,
 			updated_at = NOW()
 		WHERE id = $4
@@ -301,25 +323,96 @@ func (p *Postgres) UpdateDeploymentStatus(
 	serviceID string,
 	status model.DeploymentStatus,
 ) error {
-	_, err := p.db.ExecContext(ctx, `
+	return p.updateDeploymentStatus(ctx, serviceID, status, "")
+}
+
+func (p *Postgres) UpdateDeploymentFailure(
+	ctx context.Context,
+	serviceID string,
+	reason model.DeploymentFailureReason,
+) error {
+	switch reason {
+	case model.DeploymentFailureWorkloadFailed, model.DeploymentFailureTimeout:
+	default:
+		return fmt.Errorf("unsupported deployment failure reason %q", reason)
+	}
+	return p.updateDeploymentStatus(ctx, serviceID, model.DeploymentFailed, reason)
+}
+
+func (p *Postgres) updateDeploymentStatus(
+	ctx context.Context,
+	serviceID string,
+	status model.DeploymentStatus,
+	failureReason model.DeploymentFailureReason,
+) error {
+	var current model.DeploymentStatus
+	if err := p.db.QueryRowContext(ctx, `
+		SELECT deployment_status
+		FROM services
+		WHERE id = $1
+	`, serviceID).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %q", ErrServiceNotFound, serviceID)
+		}
+		return fmt.Errorf("read deployment status: %w", err)
+	}
+	if !validDeploymentTransition(current, status) {
+		return fmt.Errorf("%w: %s to %s", ErrInvalidDeploymentTransition, current, status)
+	}
+
+	result, err := p.db.ExecContext(ctx, `
 		UPDATE services
 		SET
 			deployment_status = $1,
+			deployment_failure_reason =
+				CASE
+					WHEN $1::VARCHAR(32) = 'FAILED'
+					THEN COALESCE(NULLIF($4::VARCHAR(64), ''), deployment_failure_reason)
+					ELSE ''
+				END,
 			updated_at = NOW()
 		WHERE id = $2
+		  AND deployment_status = $3
 	`,
 		status,
 		serviceID,
+		current,
+		failureReason,
 	)
-
 	if err != nil {
 		return fmt.Errorf(
 			"update deployment status: %w",
 			err,
 		)
 	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check deployment status update: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("%w: deployment status changed concurrently", ErrInvalidDeploymentTransition)
+	}
 
 	return nil
+}
+
+func validDeploymentTransition(from, to model.DeploymentStatus) bool {
+	if from == to {
+		return true
+	}
+
+	switch from {
+	case model.DeploymentPending:
+		return to == model.DeploymentProgressing || to == model.DeploymentFailed
+	case model.DeploymentProgressing:
+		return to == model.DeploymentAvailable || to == model.DeploymentFailed
+	case model.DeploymentAvailable:
+		return to == model.DeploymentProgressing || to == model.DeploymentFailed
+	case model.DeploymentFailed:
+		return false
+	default:
+		return false
+	}
 }
 
 func (p *Postgres) UpdateDesiredReplicas(

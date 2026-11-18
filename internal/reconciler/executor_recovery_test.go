@@ -58,21 +58,23 @@ type fakeExecutionNode struct {
 	startCallsCount int
 }
 
-func (n *fakeExecutionNode) CreateContainer(context.Context, string, runtime.ContainerConfig) (runtime.Container, error) {
+func (n *fakeExecutionNode) CreateContainer(context.Context, string, string, runtime.ContainerConfig) (runtime.Container, error) {
 	n.createCalls++
 	if n.createErr != nil {
 		return runtime.Container{}, n.createErr
 	}
 	return n.container, nil
 }
-func (n *fakeExecutionNode) StartContainer(_ context.Context, _ string, containerID string) error {
+func (n *fakeExecutionNode) StartContainer(_ context.Context, _ string, _ string, containerID string) error {
 	n.startCallsCount++
 	n.lastContainerID = containerID
 	return n.startErr
 }
-func (n *fakeExecutionNode) StopContainer(context.Context, string, string) error { return nil }
-func (n *fakeExecutionNode) DeleteContainer(context.Context, string, string) error { return nil }
-func (n *fakeExecutionNode) GetContainer(context.Context, string, string) (runtime.Container, error) {
+func (n *fakeExecutionNode) StopContainer(context.Context, string, string, string) error { return nil }
+func (n *fakeExecutionNode) DeleteContainer(context.Context, string, string, string) error {
+	return nil
+}
+func (n *fakeExecutionNode) GetContainer(context.Context, string, string, string) (runtime.Container, error) {
 	if n.inspectErr != nil {
 		return runtime.Container{}, n.inspectErr
 	}
@@ -81,13 +83,13 @@ func (n *fakeExecutionNode) GetContainer(context.Context, string, string) (runti
 
 func recoveryWorkload() model.Workload {
 	return model.Workload{
-		ID:                "w1",
-		Image:             "nginx:alpine",
-		CPURequestMillis:  100,
-		MemoryRequestMB:   128,
-		DesiredState:      model.WorkloadScheduled,
-		ActualState:       model.WorkloadScheduled,
-		ExecutionState:    model.ExecutionIdle,
+		ID:               "w1",
+		Image:            "nginx:alpine",
+		CPURequestMillis: 100,
+		MemoryRequestMB:  128,
+		DesiredState:     model.WorkloadScheduled,
+		ActualState:      model.WorkloadScheduled,
+		ExecutionState:   model.ExecutionIdle,
 	}
 }
 
@@ -135,7 +137,7 @@ func TestExecutionStartFailureIsRecoverable(t *testing.T) {
 	store := &fakeExecutionStore{}
 	node := &fakeExecutionNode{
 		container: runtime.Container{ID: "container-1", Status: "created"},
-		startErr: errors.New("daemon unavailable"),
+		startErr:  errors.New("daemon unavailable"),
 	}
 	executor := &WorkloadExecutor{store: store, nodeClient: node}
 

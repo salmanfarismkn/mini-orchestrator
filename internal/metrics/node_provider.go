@@ -51,10 +51,15 @@ func (p *NodeProvider) GetWorkloadMetrics(
 			workloadID,
 		)
 	}
+	assignedNode, err := p.store.GetNode(ctx, *workload.NodeID)
+	if err != nil {
+		return WorkloadMetrics{}, fmt.Errorf("get assigned node: %w", err)
+	}
 
 	stats, err := p.nodeClient.GetContainerStats(
 		ctx,
-		*workload.NodeID,
+		assignedNode.ID,
+		assignedNode.Address,
 		*workload.ContainerID,
 	)
 	if err != nil {

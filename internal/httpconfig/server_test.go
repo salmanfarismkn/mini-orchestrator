@@ -24,8 +24,14 @@ func TestShutdownTimeoutFromEnv(t *testing.T) {
 	if err != nil || timeout != 12*time.Second {
 		t.Fatalf("timeout = %v, err = %v", timeout, err)
 	}
-	if _, err := ShutdownTimeoutFromEnv(func(string) string { return "0" }); err == nil {
-		t.Fatal("zero shutdown timeout was accepted")
+
+	for _, value := range []string{"0", "-1", "invalid", "999999999999999999999"} {
+		if _, err := ShutdownTimeoutFromEnv(func(string) string { return value }); err == nil {
+			t.Errorf("invalid shutdown timeout %q was accepted", value)
+		}
+	}
+	if _, err := ShutdownTimeoutFromEnv(func(string) string { return "301" }); err == nil {
+		t.Fatal("excessively large shutdown timeout was accepted")
 	}
 }
 
@@ -87,16 +93,43 @@ func TestShutdownAllowsInFlightRequestToFinish(t *testing.T) {
 
 func TestShutdownTimeoutForceCloses(t *testing.T) {
 	started := make(chan struct{})
+	release := make(chan struct{})
+	handlerExited := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
-		<-r.Context().Done()
+		<-release
+		close(handlerExited)
 	}))
 
 	go server.Client().Get(server.URL)
 	<-started
 	if err := ShutdownGracefully(server.Config, 20*time.Millisecond); err == nil {
+		close(release)
 		server.Close()
 		t.Fatal("forced shutdown timeout was not reported")
+	}
+
+	select {
+	case <-handlerExited:
+		server.Close()
+		t.Fatal("handler ignoring cancellation exited before it was released")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-handlerExited
+	server.Close()
+}
+
+func TestRepeatedShutdownIsBoundedAndIdempotent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	if err := ShutdownGracefully(server.Config, time.Second); err != nil {
+		t.Fatalf("first shutdown: %v", err)
+	}
+	if err := ShutdownGracefully(server.Config, time.Second); err != nil {
+		t.Fatalf("second shutdown: %v", err)
 	}
 	server.Close()
 }

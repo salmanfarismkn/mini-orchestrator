@@ -50,15 +50,16 @@ const (
 )
 
 type multiNodeEnvironment struct {
-	database     *sql.DB
-	store        *store.Postgres
-	dsn          string
-	controlPlane *httptest.Server
-	agents       []*node.Agent
-	nodes        []model.Node
-	token        string
-	clientTLS    *tls.Config
-	tlsFiles     integrationTLSFiles
+	database      *sql.DB
+	store         *store.Postgres
+	dsn           string
+	controlPlane  *httptest.Server
+	agents        []*node.Agent
+	nodes         []model.Node
+	token         string
+	operatorToken string
+	clientTLS     *tls.Config
+	tlsFiles      integrationTLSFiles
 }
 
 type integrationTLSFiles struct {
@@ -102,16 +103,19 @@ func (r *integrationRuntime) Create(
 	}
 
 	return orchestratorRuntime.Container{
-		ID:     id,
-		Name:   config.Name,
-		Image:  config.Image,
-		Status: "created",
+		ID:         id,
+		Name:       config.Name,
+		Image:      config.Image,
+		Status:     "created",
+		WorkloadID: config.WorkloadID,
+		NodeID:     config.NodeID,
 	}, nil
 }
 
 func (r *integrationRuntime) Start(
 	_ context.Context,
 	containerID string,
+	nodeID string,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -119,6 +123,9 @@ func (r *integrationRuntime) Start(
 	container, ok := r.containers[containerID]
 	if !ok {
 		return fmt.Errorf("container %q not found", containerID)
+	}
+	if container.config.NodeID != nodeID {
+		return orchestratorRuntime.ErrContainerNotFound
 	}
 	container.state = "running"
 	r.containers[containerID] = container
@@ -128,6 +135,7 @@ func (r *integrationRuntime) Start(
 func (r *integrationRuntime) Stop(
 	_ context.Context,
 	containerID string,
+	nodeID string,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -135,6 +143,9 @@ func (r *integrationRuntime) Stop(
 	container, ok := r.containers[containerID]
 	if !ok {
 		return fmt.Errorf("%w: %s", orchestratorRuntime.ErrContainerNotFound, containerID)
+	}
+	if container.config.NodeID != nodeID {
+		return orchestratorRuntime.ErrContainerNotFound
 	}
 	container.state = "exited"
 	r.containers[containerID] = container
@@ -144,11 +155,13 @@ func (r *integrationRuntime) Stop(
 func (r *integrationRuntime) Remove(
 	_ context.Context,
 	containerID string,
+	nodeID string,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.containers[containerID]; !ok {
+	container, ok := r.containers[containerID]
+	if !ok || container.config.NodeID != nodeID {
 		return fmt.Errorf("%w: %s", orchestratorRuntime.ErrContainerNotFound, containerID)
 	}
 	delete(r.containers, containerID)
@@ -158,6 +171,7 @@ func (r *integrationRuntime) Remove(
 func (r *integrationRuntime) Inspect(
 	_ context.Context,
 	containerID string,
+	nodeID string,
 ) (orchestratorRuntime.Container, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -170,27 +184,38 @@ func (r *integrationRuntime) Inspect(
 			containerID,
 		)
 	}
+	if container.config.NodeID != nodeID {
+		return orchestratorRuntime.Container{}, orchestratorRuntime.ErrContainerNotFound
+	}
 	return orchestratorRuntime.Container{
-		ID:     containerID,
-		Name:   container.config.Name,
-		Image:  container.config.Image,
-		Status: container.state,
+		ID:         containerID,
+		Name:       container.config.Name,
+		Image:      container.config.Image,
+		Status:     container.state,
+		WorkloadID: container.config.WorkloadID,
+		NodeID:     container.config.NodeID,
 	}, nil
 }
 
 func (r *integrationRuntime) List(
 	_ context.Context,
+	nodeID string,
 ) ([]orchestratorRuntime.Container, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	result := make([]orchestratorRuntime.Container, 0, len(r.containers))
 	for id, container := range r.containers {
+		if container.config.NodeID != nodeID {
+			continue
+		}
 		result = append(result, orchestratorRuntime.Container{
-			ID:     id,
-			Name:   container.config.Name,
-			Image:  container.config.Image,
-			Status: container.state,
+			ID:         id,
+			Name:       container.config.Name,
+			Image:      container.config.Image,
+			Status:     container.state,
+			WorkloadID: container.config.WorkloadID,
+			NodeID:     container.config.NodeID,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -200,9 +225,13 @@ func (r *integrationRuntime) List(
 }
 
 func (r *integrationRuntime) Stats(
-	_ context.Context,
-	_ string,
+	ctx context.Context,
+	containerID string,
+	nodeID string,
 ) (orchestratorRuntime.ContainerStats, error) {
+	if _, err := r.Inspect(ctx, containerID, nodeID); err != nil {
+		return orchestratorRuntime.ContainerStats{}, err
+	}
 	return orchestratorRuntime.ContainerStats{}, nil
 }
 
@@ -439,7 +468,7 @@ func TestMissingContainerRecoveryAndMetricsIntegration(t *testing.T) {
 	if owningAgent == nil {
 		t.Fatalf("no integration agent for node %q", assignedNode.ID)
 	}
-	if err := owningAgent.Runtime.Remove(ctx, *workload.ContainerID); err != nil {
+	if err := owningAgent.Runtime.Remove(ctx, *workload.ContainerID, assignedNode.ID); err != nil {
 		t.Fatalf("remove test-created container: %v", err)
 	}
 
@@ -563,7 +592,7 @@ func TestMultiNodeServiceDeletionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create service deletion request: %v", err)
 	}
-	request.Header.Set("Authorization", "Bearer "+env.token)
+	request.Header.Set("Authorization", "Bearer "+env.operatorToken)
 	response, err := env.controlPlane.Client().Do(request)
 	if err != nil {
 		t.Fatalf("send service deletion request: %v", err)
@@ -580,12 +609,20 @@ func TestMultiNodeServiceDeletionIntegration(t *testing.T) {
 	if err := controller.NewDeletionController(env.store).ReconcileService(ctx, deletingService); err != nil {
 		t.Fatalf("mark workloads stopped before test container disappearance: %v", err)
 	}
-	if err := owningAgent.Runtime.Remove(ctx, *staleRunningWorkload.ContainerID); err != nil {
-		t.Fatalf("remove test container immediately before stop: %v", err)
+	runtimeReconciler := NewRuntimeReconciler(
+		env.store,
+		env.nodeClient(),
+		&observability.Metrics{},
+	)
+	if err := runtimeReconciler.ReconcileNode(ctx, assignedNode); err != nil {
+		t.Fatalf("reconcile stopped workload: %v", err)
+	}
+	if _, err := owningAgent.Runtime.Inspect(ctx, *staleRunningWorkload.ContainerID, assignedNode.ID); !errors.Is(err, orchestratorRuntime.ErrContainerNotFound) {
+		t.Fatalf("stopped workload container remains on node: inspect error = %v", err)
 	}
 	staleRunningWorkload.DesiredState = model.WorkloadStopped
 	if err := executor.Stop(ctx, staleRunningWorkload, assignedNode); err != nil {
-		t.Fatalf("stop workload after container disappeared: %v", err)
+		t.Fatalf("repeat stop using stale workload snapshot: %v", err)
 	}
 
 	reconciler := New(
@@ -595,11 +632,7 @@ func TestMultiNodeServiceDeletionIntegration(t *testing.T) {
 		controller.NewDeploymentStatusController(env.store, time.Minute),
 		schedulerService,
 		executor,
-		NewRuntimeReconciler(
-			env.store,
-			env.nodeClient(),
-			&observability.Metrics{},
-		),
+		runtimeReconciler,
 		10*time.Millisecond,
 		&observability.Metrics{},
 	)
@@ -624,27 +657,27 @@ func TestMultiNodeServiceDeletionIntegration(t *testing.T) {
 	if history[0].ActualState != model.WorkloadStopped {
 		t.Errorf("deleted service workload state = %q; want STOPPED", history[0].ActualState)
 	}
-	if history[0].NodeID == nil {
-		t.Fatal("stopped workload lost its node ID before history was checked")
+	if history[0].NodeID != nil {
+		t.Fatalf("stopped workload retained node ID %q; want ownership cleared", *history[0].NodeID)
 	}
-	if history[0].ContainerID == nil {
-		t.Fatal("stopped workload lost its container ID before history was checked")
+	if history[0].ContainerID != nil {
+		t.Fatalf("stopped workload retained container ID %q; want container ownership cleared", *history[0].ContainerID)
 	}
 	if err := executor.Stop(ctx, staleRunningWorkload, assignedNode); err != nil {
 		t.Fatalf("repeat stop using stale running snapshot: %v", err)
 	}
 	agentFound := false
 	for _, agent := range env.agents {
-		if agent.ID != *history[0].NodeID {
+		if agent.ID != assignedNode.ID {
 			continue
 		}
 		agentFound = true
-		if _, err := agent.Runtime.Inspect(ctx, *history[0].ContainerID); err == nil {
-			t.Errorf("container %q still exists after service deletion", *history[0].ContainerID)
+		if _, err := agent.Runtime.Inspect(ctx, *staleRunningWorkload.ContainerID, agent.ID); err == nil {
+			t.Errorf("container %q still exists after service deletion", *staleRunningWorkload.ContainerID)
 		}
 	}
 	if !agentFound {
-		t.Errorf("no test node agent owns workload node %q", *history[0].NodeID)
+		t.Errorf("no test node agent owns workload node %q", assignedNode.ID)
 	}
 
 	assertAllocationsMatchActiveWorkloads(t, ctx, env, serviceID)
@@ -669,7 +702,7 @@ func TestResourceReservationIdempotencyIntegration(t *testing.T) {
 	if _, err := env.store.RegisterNode(ctx, model.Node{
 		ID: nodeID, Address: "127.0.0.1:1", CPUCapacity: 1000, MemoryCapacity: 1024,
 		Status: model.NodeReady, LastHeartbeat: time.Now().UTC(), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}, nodeIdentity, "integration-reservation-"+nodeID); err != nil {
+	}, nodeIdentity, integrationID(t, "reservation-registration")); err != nil {
 		t.Fatalf("register reservation node: %v", err)
 	}
 	service := model.Service{
@@ -871,10 +904,12 @@ func newMultiNodeEnvironment(t *testing.T) *multiNodeEnvironment {
 	})
 
 	token := integrationID(t, "token")
+	operatorToken := integrationID(t, "operator-token")
 	serverTLS, clientTLS, tlsFiles := integrationTLSConfig(t)
 	controlPlane := httptest.NewUnstartedServer(api.NewServer(
 		pgStore,
 		token,
+		operatorToken,
 		&observability.Metrics{},
 	).Routes())
 	controlPlane.TLS = serverTLS
@@ -883,13 +918,14 @@ func newMultiNodeEnvironment(t *testing.T) *multiNodeEnvironment {
 	t.Cleanup(controlPlane.Close)
 
 	env := &multiNodeEnvironment{
-		database:     database,
-		store:        pgStore,
-		dsn:          dsn,
-		controlPlane: controlPlane,
-		token:        token,
-		clientTLS:    clientTLS,
-		tlsFiles:     tlsFiles,
+		database:      database,
+		store:         pgStore,
+		dsn:           dsn,
+		controlPlane:  controlPlane,
+		token:         token,
+		operatorToken: operatorToken,
+		clientTLS:     clientTLS,
+		tlsFiles:      tlsFiles,
 	}
 	for index := 0; index < 2; index++ {
 		nodeID := fmt.Sprintf("worker-%02d", index+1)
@@ -1274,7 +1310,7 @@ func integrationTLSConfig(t *testing.T) (*tls.Config, *tls.Config, integrationTL
 	caPath := filepath.Join(dir, "ca.pem")
 	writeIntegrationPEM(t, caPath, "CERTIFICATE", caDER)
 
-	issue := func(name string, serial int64, nodeID string) integrationTLSFiles {
+	issue := func(name string, serial int64, identity string) integrationTLSFiles {
 		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			t.Fatalf("generate integration leaf key for %s: %v", name, err)
@@ -1289,10 +1325,10 @@ func integrationTLSConfig(t *testing.T) (*tls.Config, *tls.Config, integrationTL
 			KeyUsage:     x509.KeyUsageDigitalSignature,
 			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		}
-		if nodeID != "" {
-			nodeURI, err := url.Parse("spiffe://mini-orchestrator/node/" + nodeID)
+		if identity != "" {
+			nodeURI, err := url.Parse(identity)
 			if err != nil {
-				t.Fatalf("parse node URI for %s: %v", nodeID, err)
+				t.Fatalf("parse certificate identity URI for %s: %v", name, err)
 			}
 			leafTemplate.URIs = []*url.URL{nodeURI}
 		}
@@ -1311,14 +1347,14 @@ func integrationTLSConfig(t *testing.T) (*tls.Config, *tls.Config, integrationTL
 		return integrationTLSFiles{certificate: certPath, privateKey: keyPath, ca: caPath}
 	}
 
-	controlPlaneFiles := issue("control-plane", 2, "")
+	controlPlaneFiles := issue("control-plane", 2, transporttls.ControlPlaneCertificateIdentity)
 	serverTLS, clientTLS, err := transporttls.Load(controlPlaneFiles.certificate, controlPlaneFiles.privateKey, controlPlaneFiles.ca)
 	if err != nil {
 		t.Fatalf("load integration mutual TLS configuration: %v", err)
 	}
 	controlPlaneFiles.nodes = map[string]integrationTLSFiles{
-		"worker-01": issue("worker-01", 3, "worker-01"),
-		"worker-02": issue("worker-02", 4, "worker-02"),
+		"worker-01": issue("worker-01", 3, transporttls.NodeCertificateIdentity("worker-01")),
+		"worker-02": issue("worker-02", 4, transporttls.NodeCertificateIdentity("worker-02")),
 	}
 	return serverTLS, clientTLS, controlPlaneFiles
 }

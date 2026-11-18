@@ -16,15 +16,15 @@ func (transport *recordingTransport) RoundTrip(request *http.Request) (*http.Res
 	return nil, errors.New("test transport stopped request")
 }
 
-func TestNodeClientUsesHTTPS(t *testing.T) {
+func TestNodeClientRejectsTransportWithoutTLSIdentityVerification(t *testing.T) {
 	transport := &recordingTransport{}
 	client := NewClient(&http.Client{Transport: transport}, "test-token")
 
-	if _, err := client.ListContainers(context.Background(), "worker.example:9001"); err == nil {
-		t.Fatal("expected test transport to stop request")
+	if _, err := client.ListContainers(context.Background(), "worker-01", "worker.example:9001"); err == nil {
+		t.Fatal("node client accepted a transport without TLS identity verification")
 	}
-	if transport.scheme != "https" {
-		t.Fatalf("request scheme = %q; want https", transport.scheme)
+	if transport.scheme != "" {
+		t.Fatalf("request reached custom transport with scheme %q; want no request", transport.scheme)
 	}
 }
 

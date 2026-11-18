@@ -114,8 +114,8 @@ func validateAddress(address string, allowEmptyHost bool) error {
 }
 
 // Stats adapts the Docker runtime Stats API to the runtime.Runtime interface.
-func (a *runtimeAdapter) Stats(ctx context.Context, containerID string) (runtime.ContainerStats, error) {
-	return a.DockerRuntime.Stats(ctx, containerID)
+func (a *runtimeAdapter) Stats(ctx context.Context, containerID, nodeID string) (runtime.ContainerStats, error) {
+	return a.DockerRuntime.Stats(ctx, containerID, nodeID)
 }
 
 func main() {
@@ -138,6 +138,10 @@ func main() {
 	advertisedHost, _, _ := net.SplitHostPort(config.Address)
 	if err := transporttls.ValidateServerName(serverTLS, advertisedHost); err != nil {
 		slog.Error("node certificate does not match advertised address", "error", err)
+		os.Exit(1)
+	}
+	if err := transporttls.ValidateURIIdentity(serverTLS, transporttls.NodeCertificateIdentity(config.ID)); err != nil {
+		slog.Error("node certificate identity does not match configured node ID", "error", err)
 		os.Exit(1)
 	}
 
@@ -169,6 +173,8 @@ func main() {
 
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	serverBaseCtx, cancelServerBase := context.WithCancel(context.WithoutCancel(rootCtx))
+	defer cancelServerBase()
 
 	registerCtx, cancel := context.WithTimeout(
 		rootCtx,
@@ -198,6 +204,9 @@ func main() {
 		Addr:      config.ListenAddress,
 		Handler:   api.RequireBearerToken(config.Token, agent.Routes()),
 		TLSConfig: serverTLS,
+		BaseContext: func(net.Listener) context.Context {
+			return serverBaseCtx
+		},
 	}
 	httpconfig.Apply(server)
 
@@ -225,11 +234,17 @@ func main() {
 		}
 	}
 
+	if listenErr != nil {
+		stopSignals()
+	}
+
 	shutdownErr := httpconfig.ShutdownGracefully(server, shutdownTimeout)
+	httpShutdownComplete := shutdownErr == nil
 	if shutdownErr != nil {
 		shutdownRequested = false
 		slog.Error("node agent HTTP shutdown did not complete gracefully", "node_id", agent.ID, "error", shutdownErr)
 	}
+	cancelServerBase()
 
 	waitDone := make(chan struct{})
 	go func() {
@@ -247,7 +262,7 @@ func main() {
 		slog.Error("node agent heartbeat loop did not stop within shutdown timeout", "node_id", agent.ID)
 	}
 
-	if heartbeatStopped {
+	if heartbeatStopped && httpShutdownComplete {
 		if err := dockerRuntime.Close(); err != nil {
 			shutdownRequested = false
 			slog.Error("node agent Docker client close failed", "node_id", agent.ID, "error", err)

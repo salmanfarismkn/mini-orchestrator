@@ -25,18 +25,25 @@ func Apply(server *http.Server) {
 	server.MaxHeaderBytes = MaxHeaderBytes
 }
 
-const DefaultShutdownTimeout = 30 * time.Second
+const (
+	DefaultShutdownTimeout = 30 * time.Second
+	MaxShutdownTimeout     = 5 * time.Minute
+)
 
 func ShutdownTimeoutFromEnv(getenv func(string) string) (time.Duration, error) {
 	value := strings.TrimSpace(getenv("ORCHESTRATOR_SHUTDOWN_TIMEOUT"))
 	if value == "" {
 		return DefaultShutdownTimeout, nil
 	}
-	seconds, err := strconv.Atoi(value)
+	seconds, err := strconv.ParseInt(value, 10, 32)
 	if err != nil || seconds <= 0 {
 		return 0, fmt.Errorf("ORCHESTRATOR_SHUTDOWN_TIMEOUT must be a positive number of seconds")
 	}
-	return time.Duration(seconds) * time.Second, nil
+	timeout := time.Duration(seconds) * time.Second
+	if timeout > MaxShutdownTimeout {
+		return 0, fmt.Errorf("ORCHESTRATOR_SHUTDOWN_TIMEOUT must not exceed %d seconds", int64(MaxShutdownTimeout/time.Second))
+	}
+	return timeout, nil
 }
 
 // ShutdownGracefully stops accepting requests, waits for active requests, and

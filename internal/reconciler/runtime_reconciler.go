@@ -36,7 +36,7 @@ func (r *RuntimeReconciler) ReconcileNode(
 	node model.Node,
 ) error {
 	// 1. List all containers currently running on the node
-	containers, err := r.nodeClient.ListContainers(ctx, node.Address)
+	containers, err := r.nodeClient.ListContainers(ctx, node.ID, node.Address)
 	if err != nil {
 		return err
 	}
@@ -67,8 +67,16 @@ func (r *RuntimeReconciler) ReconcileNode(
 				"node_id", node.ID,
 			)
 
-			if err := r.nodeClient.StopContainer(ctx, node.Address, container.ID); err != nil {
+			if err := r.nodeClient.StopContainer(ctx, node.ID, node.Address, container.ID); err != nil {
 				r.logger.Error("failed to stop container",
+					"workload_id", workload.ID,
+					"node_id", node.ID,
+					"error", err,
+				)
+				continue
+			}
+			if err := r.nodeClient.DeleteContainer(ctx, node.ID, node.Address, container.ID); err != nil {
+				r.logger.Error("failed to delete stopped container",
 					"workload_id", workload.ID,
 					"node_id", node.ID,
 					"error", err,
@@ -143,8 +151,7 @@ func (r *RuntimeReconciler) ReconcileNode(
 
 		if workload.DesiredState == model.WorkloadScheduled &&
 			(workload.ExecutionState == model.ExecutionStarting ||
-				workload.ExecutionState == model.ExecutionCreated ||
-				workload.ExecutionState == model.ExecutionRunning) {
+				workload.ExecutionState == model.ExecutionCreated) {
 			if err := r.store.ResetExecutionIntent(ctx, workload.ID); err != nil {
 				return fmt.Errorf("reset missing workload execution: %w", err)
 			}

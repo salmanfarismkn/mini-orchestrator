@@ -59,6 +59,7 @@ func (a *Agent) CreateContainer(
 		runtime.ContainerConfig{
 			Name:       req.Name,
 			WorkloadID: req.WorkloadID,
+			NodeID:     a.ID,
 			Image:      req.Image,
 			CPUMillis:  req.CPUMillis,
 			MemoryMB:   req.MemoryMB,
@@ -102,7 +103,11 @@ func (a *Agent) StartContainer(
 		return
 	}
 
-	if err := a.Runtime.Start(r.Context(), id); err != nil {
+	if err := a.Runtime.Start(r.Context(), id, a.ID); err != nil {
+		if errors.Is(err, runtime.ErrContainerNotFound) || errors.Is(err, runtime.ErrContainerNotOwned) {
+			http.Error(w, "container not found", http.StatusNotFound)
+			return
+		}
 		slog.Error("container start failed", "container_id", id, "error", err)
 		http.Error(
 			w,
@@ -126,7 +131,11 @@ func (a *Agent) StopContainer(
 		return
 	}
 
-	if err := a.Runtime.Stop(r.Context(), id); err != nil {
+	if err := a.Runtime.Stop(r.Context(), id, a.ID); err != nil {
+		if errors.Is(err, runtime.ErrContainerNotOwned) {
+			http.Error(w, "container not found", http.StatusNotFound)
+			return
+		}
 		if errors.Is(err, runtime.ErrContainerNotFound) {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -154,7 +163,11 @@ func (a *Agent) RemoveContainer(
 		return
 	}
 
-	if err := a.Runtime.Remove(r.Context(), id); err != nil {
+	if err := a.Runtime.Remove(r.Context(), id, a.ID); err != nil {
+		if errors.Is(err, runtime.ErrContainerNotOwned) {
+			http.Error(w, "container not found", http.StatusNotFound)
+			return
+		}
 		if errors.Is(err, runtime.ErrContainerNotFound) {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -182,9 +195,9 @@ func (a *Agent) InspectContainer(
 		return
 	}
 
-	container, err := a.Runtime.Inspect(r.Context(), id)
+	container, err := a.Runtime.Inspect(r.Context(), id, a.ID)
 	if err != nil {
-		if errors.Is(err, runtime.ErrContainerNotFound) {
+		if errors.Is(err, runtime.ErrContainerNotFound) || errors.Is(err, runtime.ErrContainerNotOwned) {
 			http.Error(w, "container not found", http.StatusNotFound)
 			return
 		}
@@ -202,7 +215,7 @@ func (a *Agent) ListContainers(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	containers, err := a.Runtime.List(r.Context())
+	containers, err := a.Runtime.List(r.Context(), a.ID)
 	if err != nil {
 		slog.Error("container list failed", "error", err)
 		http.Error(
