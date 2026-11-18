@@ -18,7 +18,7 @@ func (s *Server) Routes() http.Handler {
 		"POST /nodes/register",
 		RequireBearerToken(
 			s.nodeToken,
-			RequireMutualTLS(http.HandlerFunc(s.registerNode)),
+			RequireMutualTLS(RequireNodeIdentity(http.HandlerFunc(s.registerNode))),
 		),
 	)
 
@@ -26,7 +26,7 @@ func (s *Server) Routes() http.Handler {
 		"POST /nodes/heartbeat",
 		RequireBearerToken(
 			s.nodeToken,
-			RequireMutualTLS(http.HandlerFunc(s.heartbeat)),
+			RequireMutualTLS(RequireNodeIdentity(http.HandlerFunc(s.heartbeat))),
 		),
 	)
 

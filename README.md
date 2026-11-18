@@ -122,8 +122,11 @@ Additional variables:
 | `ORCHESTRATOR_LISTEN_ADDR` | No | Node agent | Local bind address; default `:9001`. |
 | `ORCHESTRATOR_NODE_CPU_MILLIS` | No | Node agent | Advertised CPU capacity in millicores; default `4000`. |
 | `ORCHESTRATOR_NODE_MEMORY_MB` | No | Node agent | Advertised memory capacity in MB; default `8192`. |
+| `ORCHESTRATOR_SHUTDOWN_TIMEOUT` | No | Control plane and node agent | Positive integer number of seconds allowed for HTTP and background-component shutdown; default `30`. |
 | `POSTGRES_PASSWORD` | Yes for Compose | Compose | PostgreSQL password; Compose fails configuration when unset. |
 | `POSTGRES_PORT` | No | Compose | Host port, default `5432`, bound to `127.0.0.1`. |
+
+Both processes handle `SIGINT` and `SIGTERM`. The control plane stops its HTTP listener, cancels background loops, waits for bounded loop completion, and closes PostgreSQL after the loops stop. The node agent cancels heartbeat activity, shuts down its HTTP listener, and closes the Docker client without stopping or removing containers. Shutdown timeout expiration force-closes HTTP connections and is reported as a non-graceful shutdown.
 
 For multiple local agents, configure a distinct node ID and listen address for
 each process. The node listener and the control-plane-advertised address are
@@ -135,45 +138,44 @@ The token, TLS paths, HTTPS control-plane URL, and advertised address are
 required. Listener and capacity defaults are for one development agent; node
 IDs must be unique when multiple agents register.
 
-## Local development certificate example
+## Local development certificate provisioning
 
-This creates a **development-only** CA and one leaf certificate. Use a
-certificate SAN for every DNS name/IP used by the control plane and agents.
-For a same-host, one-agent setup, `localhost` and `127.0.0.1` are sufficient.
-For separate hosts, add each real endpoint name/IP to `subjectAltName` before
-issuing the certificate. Do not use this shared local leaf/key as a production
-PKI or certificate-rotation strategy.
-
-Run in PowerShell in a private directory outside the repository:
+Use the repository script to generate a development-only CA, a control-plane
+leaf certificate, and a separate leaf certificate/private key for every node:
 
 ```powershell
-$certDir = Join-Path $env:USERPROFILE '.mini-orchestrator\local-certs'
-New-Item -ItemType Directory -Force $certDir | Out-Null
-Set-Location $certDir
-
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 `
-  -keyout ca-key.pem -out ca.pem -days 30 -nodes `
-  -subj "/CN=mini-orchestrator-local-test-ca"
-
-openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 `
-  -keyout orchestrator-key.pem -out orchestrator.csr -nodes `
-  -subj "/CN=localhost"
-
-@'
-subjectAltName = DNS:localhost,IP:127.0.0.1
-keyUsage = digitalSignature,keyEncipherment
-extendedKeyUsage = serverAuth,clientAuth
-'@ | Set-Content -Encoding ascii .\leaf.ext
-
-openssl x509 -req -in orchestrator.csr -CA ca.pem -CAkey ca-key.pem `
-  -CAcreateserial -out orchestrator.pem -days 30 -sha256 -extfile leaf.ext
+.\scripts\provision_dev_certs.ps1
 ```
 
-Do not print, commit, or share `ca-key.pem` or `orchestrator-key.pem`. The
-application loads one cert/key pair for server and client roles. The control
-plane accepts client certificates optionally at the listener, but node
-registration and heartbeat handlers require a verified certificate. The
-node-agent HTTPS server requires a verified client certificate for its routes.
+The default output directory is `$env:USERPROFILE\.mini-orchestrator\local-certs`.
+It provisions `worker-01` and `worker-02` by default. Provision additional nodes
+with:
+
+```powershell
+.\scripts\provision_dev_certs.ps1 -NodeIds worker-01,worker-02,worker-03
+```
+
+The script refuses to overwrite existing credentials unless `-Force` is supplied.
+It issues one leaf certificate per node with:
+
+- URI SAN `spiffe://mini-orchestrator/node/<node-id>`
+- DNS SAN `localhost`
+- IP SAN `127.0.0.1`
+- `serverAuth` and `clientAuth` extended key usage
+
+Every leaf is signed by the single development CA. The CA private key is kept
+separate at `ca-key.pem` and is not embedded in control-plane or node credentials.
+Generated PEM files and private keys are ignored by Git. Do not commit or share the
+CA private key or node private keys. These certificates are development-only and
+do not provide certificate rotation, revocation, or production PKI support.
+
+Node identity authorization is not yet implemented: the URI SAN establishes a
+unique provisioning identity, but registration and heartbeat handlers must still
+be updated before the control plane can enforce it.
+
+The application loads a certificate/key pair as both an HTTPS server identity
+and client identity. The control plane trusts the development CA for client
+certificates, and node-agent HTTPS servers require verified client certificates.
 In each later PowerShell terminal, set `$certDir` again to the same path before
 using the certificate files.
 
@@ -209,8 +211,8 @@ Build and start the control plane in one terminal:
 ```powershell
 $env:ORCHESTRATOR_NODE_TOKEN = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
 $certDir = Join-Path $env:USERPROFILE '.mini-orchestrator\local-certs'
-$env:ORCHESTRATOR_TLS_CERT_FILE = Join-Path $certDir 'orchestrator.pem'
-$env:ORCHESTRATOR_TLS_KEY_FILE = Join-Path $certDir 'orchestrator-key.pem'
+$env:ORCHESTRATOR_TLS_CERT_FILE = Join-Path $certDir 'control-plane.pem'
+$env:ORCHESTRATOR_TLS_KEY_FILE = Join-Path $certDir 'control-plane-key.pem'
 $env:ORCHESTRATOR_TLS_CA_FILE = Join-Path $certDir 'ca.pem'
 New-Item -ItemType Directory -Force .\bin | Out-Null
 go build -o .\bin\control-plane.exe .\cmd\control-plane
@@ -224,19 +226,19 @@ go build -o .\bin\node-agent.exe .\cmd\node-agent
 ```
 
 The angle-bracket token above is a placeholder, not a secret value. Do not
-include quotes/brackets in the actual token. Two agent processes on one host can share the token and certificate while
-providing distinct IDs and ports. Open a separate terminal for each process;
-set the corresponding values below in each. The agent processes require access
-to Docker Engine. On one development host they share that Engine and are not
-independent Docker hosts.
+include quotes/brackets in the actual token. Two agent processes on one host
+share the bearer token but use distinct certificate/private-key pairs and ports.
+Open a separate terminal for each process and set the corresponding values below.
+The agent processes require access to Docker Engine. On one development host they
+share that Engine and are not independent Docker hosts.
 
 First agent:
 
 ```powershell
 $env:ORCHESTRATOR_NODE_TOKEN = '<same locally generated token>'
 $certDir = Join-Path $env:USERPROFILE '.mini-orchestrator\local-certs'
-$env:ORCHESTRATOR_TLS_CERT_FILE = Join-Path $certDir 'orchestrator.pem'
-$env:ORCHESTRATOR_TLS_KEY_FILE = Join-Path $certDir 'orchestrator-key.pem'
+$env:ORCHESTRATOR_TLS_CERT_FILE = Join-Path $certDir 'worker-01.pem'
+$env:ORCHESTRATOR_TLS_KEY_FILE = Join-Path $certDir 'worker-01-key.pem'
 $env:ORCHESTRATOR_TLS_CA_FILE = Join-Path $certDir 'ca.pem'
 $env:ORCHESTRATOR_CONTROL_PLANE_URL = 'https://127.0.0.1:8080'
 $env:ORCHESTRATOR_NODE_ID = 'worker-01'
@@ -250,8 +252,8 @@ Second agent, in another terminal:
 ```powershell
 $env:ORCHESTRATOR_NODE_TOKEN = '<same locally generated token>'
 $certDir = Join-Path $env:USERPROFILE '.mini-orchestrator\local-certs'
-$env:ORCHESTRATOR_TLS_CERT_FILE = Join-Path $certDir 'orchestrator.pem'
-$env:ORCHESTRATOR_TLS_KEY_FILE = Join-Path $certDir 'orchestrator-key.pem'
+$env:ORCHESTRATOR_TLS_CERT_FILE = Join-Path $certDir 'worker-02.pem'
+$env:ORCHESTRATOR_TLS_KEY_FILE = Join-Path $certDir 'worker-02-key.pem'
 $env:ORCHESTRATOR_TLS_CA_FILE = Join-Path $certDir 'ca.pem'
 $env:ORCHESTRATOR_CONTROL_PLANE_URL = 'https://127.0.0.1:8080'
 $env:ORCHESTRATOR_NODE_ID = 'worker-02'

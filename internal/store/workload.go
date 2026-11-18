@@ -12,6 +12,9 @@ func (p *Postgres) CreateWorkload(
 	ctx context.Context,
 	workload model.Workload,
 ) error {
+	if workload.ExecutionState == "" {
+		workload.ExecutionState = model.ExecutionIdle
+	}
 	const query = `
         INSERT INTO workloads (
             id,
@@ -24,10 +27,13 @@ func (p *Postgres) CreateWorkload(
             deployment_version,
             desired_state,
             actual_state,
+            execution_state,
+            execution_error,
+            resource_reserved,
             created_at,
             updated_at
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
     `
 
 	_, err := p.db.ExecContext(
@@ -43,6 +49,9 @@ func (p *Postgres) CreateWorkload(
 		workload.DeploymentVersion,
 		workload.DesiredState,
 		workload.ActualState,
+		workload.ExecutionState,
+		workload.ExecutionError,
+		workload.ResourceReserved,
 		workload.CreatedAt,
 		workload.UpdatedAt,
 	)
@@ -70,6 +79,9 @@ func (p *Postgres) GetWorkload(
 			deployment_version,
 			desired_state,
 			actual_state,
+			execution_state,
+			execution_error,
+			resource_reserved,
 			created_at,
 			updated_at
 		FROM workloads
@@ -89,6 +101,9 @@ func (p *Postgres) GetWorkload(
 		&workload.DeploymentVersion,
 		&workload.DesiredState,
 		&workload.ActualState,
+		&workload.ExecutionState,
+		&workload.ExecutionError,
+		&workload.ResourceReserved,
 		&workload.CreatedAt,
 		&workload.UpdatedAt,
 	)
@@ -120,6 +135,9 @@ func (p *Postgres) ListWorkloadsByService(
 			deployment_version,
 			desired_state,
 			actual_state,
+			execution_state,
+			execution_error,
+			resource_reserved,
 			created_at,
 			updated_at
 		FROM workloads
@@ -153,6 +171,8 @@ func (p *Postgres) ListWorkloadsByService(
 			&workload.DeploymentVersion,
 			&workload.DesiredState,
 			&workload.ActualState,
+			&workload.ExecutionState,
+			&workload.ExecutionError,
 			&workload.CreatedAt,
 			&workload.UpdatedAt,
 		); err != nil {
@@ -183,115 +203,99 @@ func (p *Postgres) ReserveNodeForWorkload(
 	defer tx.Rollback()
 
 	var (
-		cpuCapacity     int
-		memoryCapacity  int
-		cpuAllocated    int
-		memoryAllocated int
-		status          model.NodeStatus
+		desiredState     model.WorkloadState
+		actualState      model.WorkloadState
+		resourceReserved bool
+		existingNodeID   sql.NullString
 	)
 
-	const nodeQuery = `
-        SELECT
-            cpu_capacity_millis,
-            memory_capacity_mb,
-            cpu_allocated_millis,
-            memory_allocated_mb,
-            status
-        FROM nodes
-        WHERE id = $1
-        FOR UPDATE
-    `
+	err = tx.QueryRowContext(ctx, `
+		SELECT desired_state, actual_state, resource_reserved, node_id
+		FROM workloads
+		WHERE id = $1
+		FOR UPDATE
+	`, workloadID).Scan(&desiredState, &actualState, &resourceReserved, &existingNodeID)
+	if err != nil {
+		return fmt.Errorf("lock workload %q for reservation: %w", workloadID, err)
+	}
+	if resourceReserved {
+		if !existingNodeID.Valid || existingNodeID.String != nodeID {
+			return fmt.Errorf("workload %q already holds resources on a different or missing node", workloadID)
+		}
+		return nil
+	}
+	if desiredState != model.WorkloadPending || actualState != model.WorkloadPending || existingNodeID.Valid {
+		return fmt.Errorf("workload %q is not eligible for scheduling", workloadID)
+	}
 
-	err = tx.QueryRowContext(
-		ctx,
-		nodeQuery,
-		nodeID,
-	).Scan(
-		&cpuCapacity,
-		&memoryCapacity,
-		&cpuAllocated,
-		&memoryAllocated,
-		&status,
-	)
-
+	var cpuCapacity, memoryCapacity, cpuAllocated, memoryAllocated int
+	var status model.NodeStatus
+	err = tx.QueryRowContext(ctx, `
+		SELECT cpu_capacity_millis, memory_capacity_mb,
+		       cpu_allocated_millis, memory_allocated_mb, status
+		FROM nodes
+		WHERE id = $1
+		FOR UPDATE
+	`, nodeID).Scan(&cpuCapacity, &memoryCapacity, &cpuAllocated, &memoryAllocated, &status)
 	if err != nil {
 		return fmt.Errorf("lock node %q: %w", nodeID, err)
 	}
-
 	if status != model.NodeReady {
 		return fmt.Errorf("node %q is not ready", nodeID)
+	}
+	if cpuCapacity < cpuAllocated || memoryCapacity < memoryAllocated {
+		return fmt.Errorf("node %q has inconsistent resource allocations", nodeID)
 	}
 
 	availableCPU := cpuCapacity - cpuAllocated
 	availableMemory := memoryCapacity - memoryAllocated
-
 	if availableCPU < cpuMillis {
-		return fmt.Errorf(
-			"node %q has insufficient CPU: available=%d requested=%d",
-			nodeID,
-			availableCPU,
-			cpuMillis,
-		)
+		return fmt.Errorf("node %q has insufficient CPU: available=%d requested=%d", nodeID, availableCPU, cpuMillis)
 	}
-
 	if availableMemory < memoryMB {
-		return fmt.Errorf(
-			"node %q has insufficient memory: available=%d requested=%d",
-			nodeID,
-			availableMemory,
-			memoryMB,
-		)
+		return fmt.Errorf("node %q has insufficient memory: available=%d requested=%d", nodeID, availableMemory, memoryMB)
 	}
 
-	const updateNodeQuery = `
-        UPDATE nodes
-        SET
-            cpu_allocated_millis = cpu_allocated_millis + $2,
-            memory_allocated_mb = memory_allocated_mb + $3,
-            updated_at = NOW()
-        WHERE id = $1
-    `
-
-	_, err = tx.ExecContext(ctx, updateNodeQuery, nodeID, cpuMillis, memoryMB)
+	result, err := tx.ExecContext(ctx, `
+		UPDATE nodes
+		SET cpu_allocated_millis = cpu_allocated_millis + $2,
+		    memory_allocated_mb = memory_allocated_mb + $3,
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND status = $4
+		  AND cpu_capacity_millis - cpu_allocated_millis >= $2
+		  AND memory_capacity_mb - memory_allocated_mb >= $3
+	`, nodeID, cpuMillis, memoryMB, model.NodeReady)
 	if err != nil {
 		return fmt.Errorf("reserve resources on node %q: %w", nodeID, err)
 	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return fmt.Errorf("reserve resources on node %q: capacity changed or node became unavailable", nodeID)
+	}
 
-	// Convert nodeID into a pointer for workloads table
-	nodeIDValue := nodeID
-
-	const assignWorkloadQuery = `
-        UPDATE workloads
-        SET
-            node_id = $2,
-            desired_state = $3,
-            updated_at = NOW()
-        WHERE id = $1
-    `
-
-	result, err := tx.ExecContext(
-		ctx,
-		assignWorkloadQuery,
-		workloadID,
-		nodeIDValue,
-		model.WorkloadScheduled,
-	)
+	result, err = tx.ExecContext(ctx, `
+		UPDATE workloads
+		SET node_id = $2,
+		    desired_state = $3,
+		    execution_state = $4,
+		    execution_error = '',
+		    resource_reserved = TRUE,
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND desired_state = $5
+		  AND actual_state = $5
+		  AND node_id IS NULL
+		  AND resource_reserved = FALSE
+	`, workloadID, nodeID, model.WorkloadScheduled, model.ExecutionIdle, model.WorkloadPending)
 	if err != nil {
 		return fmt.Errorf("assign workload %q: %w", workloadID, err)
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("check workload assignment: %w", err)
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return fmt.Errorf("workload %q eligibility changed during reservation", workloadID)
 	}
-	if rows == 0 {
-		return fmt.Errorf("workload %q not found", workloadID)
-	}
-
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit resource reservation: %w", err)
 	}
-
 	return nil
 }
 
@@ -307,6 +311,117 @@ func (p *Postgres) CreatePendingWorkload(
 	return p.CreateWorkload(ctx, workload)
 }
 
+func (p *Postgres) ClaimExecution(
+	ctx context.Context,
+	workloadID string,
+) (bool, error) {
+	result, err := p.db.ExecContext(ctx, `
+		UPDATE workloads
+		SET execution_state = $1,
+			execution_error = '',
+			updated_at = NOW()
+		WHERE id = $2
+		  AND desired_state = $3
+		  AND execution_state IN ($4, $5)
+	`,
+		model.ExecutionStarting,
+		workloadID,
+		model.WorkloadScheduled,
+		model.ExecutionIdle,
+		model.ExecutionStarting,
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim workload execution: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check execution claim: %w", err)
+	}
+	return rows == 1, nil
+}
+
+func (p *Postgres) PersistContainerID(
+	ctx context.Context,
+	workloadID string,
+	containerID string,
+) error {
+	result, err := p.db.ExecContext(ctx, `
+		UPDATE workloads
+		SET container_id = $1,
+			execution_state = $2,
+			execution_error = '',
+			updated_at = NOW()
+		WHERE id = $3
+		  AND desired_state = $4
+		  AND execution_state IN ($5, $6)
+	  AND (container_id IS NULL OR container_id = $1)
+	`,
+		containerID,
+		model.ExecutionCreated,
+		workloadID,
+		model.WorkloadScheduled,
+		model.ExecutionStarting,
+		model.ExecutionCreated,
+	)
+	if err != nil {
+		return fmt.Errorf("persist workload container ID: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check container ID persistence: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("workload %q execution state or container identity changed", workloadID)
+	}
+	return nil
+}
+
+func (p *Postgres) SetExecutionError(
+	ctx context.Context,
+	workloadID string,
+	state model.ExecutionState,
+	message string,
+) error {
+	result, err := p.db.ExecContext(ctx, `
+		UPDATE workloads
+		SET execution_state = $1,
+			execution_error = $2,
+			updated_at = NOW()
+		WHERE id = $3
+		  AND desired_state = $4
+	`, state, message, workloadID, model.WorkloadScheduled)
+	if err != nil {
+		return fmt.Errorf("set workload execution error: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check execution error update: %w", err)
+	} else if rows == 0 {
+		return fmt.Errorf("workload %q is not scheduled", workloadID)
+	}
+	return nil
+}
+
+func (p *Postgres) ResetExecutionIntent(
+	ctx context.Context,
+	workloadID string,
+) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE workloads
+		SET container_id = NULL,
+			actual_state = 'SCHEDULED',
+			execution_state = $1,
+			execution_error = '',
+			updated_at = NOW()
+		WHERE id = $2
+		  AND desired_state = $3
+		  AND execution_state IN ($1, $4, $5)
+	`, model.ExecutionStarting, workloadID, model.WorkloadScheduled, model.ExecutionCreated, model.ExecutionRunning)
+	if err != nil {
+		return fmt.Errorf("reset workload execution intent: %w", err)
+	}
+	return nil
+}
+
 func (p *Postgres) MarkWorkloadRunning(
 	ctx context.Context,
 	workloadID string,
@@ -317,6 +432,8 @@ func (p *Postgres) MarkWorkloadRunning(
 		SET
 			container_id = $1,
 			actual_state = $2,
+			execution_state = $5,
+			execution_error = '',
 			updated_at = NOW()
 		WHERE id = $3
 		  AND desired_state = $4
@@ -325,6 +442,7 @@ func (p *Postgres) MarkWorkloadRunning(
 		model.WorkloadRunning,
 		workloadID,
 		model.WorkloadScheduled,
+		model.ExecutionRunning,
 	)
 	if err != nil {
 		return fmt.Errorf("mark workload running: %w", err)
@@ -346,21 +464,7 @@ func (p *Postgres) MarkWorkloadFailed(
 	ctx context.Context,
 	workloadID string,
 ) error {
-	_, err := p.db.ExecContext(ctx, `
-		UPDATE workloads
-		SET
-			actual_state = $1,
-			updated_at = NOW()
-		WHERE id = $2
-	`,
-		model.WorkloadFailed,
-		workloadID,
-	)
-	if err != nil {
-		return fmt.Errorf("mark workload failed: %w", err)
-	}
-
-	return nil
+	return p.MarkWorkloadFailedAndReleaseResources(ctx, workloadID)
 }
 
 func (p *Postgres) GetWorkloadByContainerID(
@@ -381,6 +485,9 @@ func (p *Postgres) GetWorkloadByContainerID(
 			deployment_version,
 			desired_state,
 			actual_state,
+			execution_state,
+			execution_error,
+			resource_reserved,
 			created_at,
 			updated_at
 		FROM workloads
@@ -396,6 +503,9 @@ func (p *Postgres) GetWorkloadByContainerID(
 		&workload.DeploymentVersion,
 		&workload.DesiredState,
 		&workload.ActualState,
+		&workload.ExecutionState,
+		&workload.ExecutionError,
+		&workload.ResourceReserved,
 		&workload.CreatedAt,
 		&workload.UpdatedAt,
 	)
@@ -415,21 +525,20 @@ func (p *Postgres) UpdateWorkloadActualState(
 	workloadID string,
 	state model.WorkloadState,
 ) error {
+	if state == model.WorkloadFailed {
+		return p.MarkWorkloadFailedAndReleaseResources(ctx, workloadID)
+	}
+	if state == model.WorkloadStopped {
+		return p.MarkWorkloadStoppedAndReleaseResources(ctx, workloadID)
+	}
 	_, err := p.db.ExecContext(ctx, `
 		UPDATE workloads
-		SET
-			actual_state = $1,
-			updated_at = NOW()
+		SET actual_state = $1, updated_at = NOW()
 		WHERE id = $2
-	`,
-		state,
-		workloadID,
-	)
-
+	`, state, workloadID)
 	if err != nil {
 		return fmt.Errorf("update workload actual state: %w", err)
 	}
-
 	return nil
 }
 
@@ -444,69 +553,59 @@ func (p *Postgres) MarkWorkloadFailedAndReleaseResources(
 	defer tx.Rollback()
 
 	var (
-		nodeID        *string
-		cpuRequest    int
-		memoryRequest int
-		actualState   model.WorkloadState
+		nodeID           *string
+		cpuRequest       int
+		memoryRequest    int
+		actualState      model.WorkloadState
+		resourceReserved bool
 	)
 
 	err = tx.QueryRowContext(ctx, `
-        SELECT
-            node_id,
-            cpu_request_millis,
-            memory_request_mb,
-            actual_state
-        FROM workloads
-        WHERE id = $1
-        FOR UPDATE
-    `, workloadID).Scan(
-		&nodeID,
-		&cpuRequest,
-		&memoryRequest,
-		&actualState,
-	)
-
+		SELECT node_id, cpu_request_millis, memory_request_mb,
+		       actual_state, resource_reserved
+		FROM workloads WHERE id = $1 FOR UPDATE
+	`, workloadID).Scan(&nodeID, &cpuRequest, &memoryRequest, &actualState, &resourceReserved)
 	if err != nil {
 		return fmt.Errorf("get workload for failure: %w", err)
 	}
 
-	if actualState == model.WorkloadFailed {
+	if actualState == model.WorkloadFailed && !resourceReserved {
 		return nil
 	}
 
-	if nodeID != nil {
+	if resourceReserved {
+		if nodeID == nil {
+			return fmt.Errorf("inconsistent reservation for workload %q: reserved without node", workloadID)
+		}
 		result, err := tx.ExecContext(ctx, `
-            UPDATE nodes
-            SET
-                cpu_allocated_millis = GREATEST(cpu_allocated_millis - $1, 0),
-                memory_allocated_mb = GREATEST(memory_allocated_mb - $2, 0),
-                updated_at = NOW()
-            WHERE id = $3
-        `,
-			cpuRequest,
-			memoryRequest,
-			*nodeID,
-		)
+			UPDATE nodes
+			SET cpu_allocated_millis = cpu_allocated_millis - $1,
+			    memory_allocated_mb = memory_allocated_mb - $2,
+			    updated_at = NOW()
+			WHERE id = $3
+			  AND cpu_allocated_millis >= $1
+			  AND memory_allocated_mb >= $2
+		`, cpuRequest, memoryRequest, *nodeID)
 		if err != nil {
 			return fmt.Errorf("release node resources: %w", err)
 		}
 		if rows, err := result.RowsAffected(); err != nil {
 			return fmt.Errorf("check resource release: %w", err)
-		} else if rows == 0 {
-			return fmt.Errorf("could not release resources for node %q", *nodeID)
+		} else if rows != 1 {
+			return fmt.Errorf("inconsistent resource allocation on node %q for workload %q", *nodeID, workloadID)
 		}
 	}
 
 	_, err = tx.ExecContext(ctx, `
-        UPDATE workloads
-        SET
-            actual_state = $1,
-            updated_at = NOW()
-        WHERE id = $2
-    `,
-		model.WorkloadFailed,
-		workloadID,
-	)
+		UPDATE workloads
+		SET actual_state = $1,
+		    execution_state = $2,
+		    resource_reserved = FALSE,
+		    node_id = NULL,
+		    container_id = NULL,
+		    updated_at = NOW()
+		WHERE id = $3
+	`, model.WorkloadFailed, model.ExecutionFailed, workloadID)
 	if err != nil {
 		return fmt.Errorf("mark workload failed: %w", err)
 	}
@@ -535,13 +634,15 @@ func (p *Postgres) RecoverWorkloadsFromNode(
 			memory_request_mb
 		FROM workloads
 		WHERE node_id = $1
-		  AND actual_state IN ($2, $3, $4)
+		  AND resource_reserved = TRUE
+		  AND actual_state IN ($2, $3, $4, $5)
 		FOR UPDATE
 	`,
 		nodeID,
 		model.WorkloadPending,
 		model.WorkloadScheduled,
 		model.WorkloadRunning,
+		model.WorkloadFailed,
 	)
 	if err != nil {
 		return fmt.Errorf("find node workloads: %w", err)
@@ -582,11 +683,15 @@ func (p *Postgres) RecoverWorkloadsFromNode(
 				container_id = NULL,
 				desired_state = $1,
 				actual_state = $1,
+				execution_state = $3,
+				execution_error = '',
+				resource_reserved = FALSE,
 				updated_at = NOW()
 			WHERE id = $2
 		`,
 			model.WorkloadPending,
 			workload.ID,
+			model.ExecutionIdle,
 		)
 
 		if err != nil {
@@ -652,27 +757,18 @@ func (p *Postgres) MarkWorkloadStoppedAndReleaseResources(
 	defer tx.Rollback()
 
 	var (
-		nodeID        *string
-		cpuRequest    int
-		memoryRequest int
-		actualState   model.WorkloadState
+		nodeID           *string
+		cpuRequest       int
+		memoryRequest    int
+		actualState      model.WorkloadState
+		resourceReserved bool
 	)
 
 	err = tx.QueryRowContext(ctx, `
-		SELECT
-			node_id,
-			cpu_request_millis,
-			memory_request_mb,
-			actual_state
-		FROM workloads
-		WHERE id = $1
-		FOR UPDATE
-	`, workloadID).Scan(
-		&nodeID,
-		&cpuRequest,
-		&memoryRequest,
-		&actualState,
-	)
+		SELECT node_id, cpu_request_millis, memory_request_mb,
+		       actual_state, resource_reserved
+		FROM workloads WHERE id = $1 FOR UPDATE
+	`, workloadID).Scan(&nodeID, &cpuRequest, &memoryRequest, &actualState, &resourceReserved)
 
 	if err != nil {
 		return fmt.Errorf(
@@ -681,41 +777,46 @@ func (p *Postgres) MarkWorkloadStoppedAndReleaseResources(
 		)
 	}
 
-	// Already stopped, so resources should already be released.
-	if actualState == model.WorkloadStopped {
+	if actualState == model.WorkloadStopped && !resourceReserved {
 		return nil
 	}
 
-	if nodeID != nil {
-		_, err = tx.ExecContext(ctx, `
+	if resourceReserved {
+		if nodeID == nil {
+			return fmt.Errorf("inconsistent reservation for workload %q: reserved without node", workloadID)
+		}
+		result, err := tx.ExecContext(ctx, `
 			UPDATE nodes
-			SET
-				cpu_allocated_millis = GREATEST(cpu_allocated_millis - $1, 0),
-				memory_allocated_mb = GREATEST(memory_allocated_mb - $2, 0),
-				updated_at = NOW()
+			SET cpu_allocated_millis = cpu_allocated_millis - $1,
+			    memory_allocated_mb = memory_allocated_mb - $2,
+			    updated_at = NOW()
 			WHERE id = $3
-		`,
-			cpuRequest,
-			memoryRequest,
-			*nodeID,
-		)
-
+			  AND cpu_allocated_millis >= $1
+			  AND memory_allocated_mb >= $2
+		`, cpuRequest, memoryRequest, *nodeID)
 		if err != nil {
-			return fmt.Errorf(
-				"release workload resources: %w",
-				err,
-			)
+			return fmt.Errorf("release workload resources: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil {
+			return fmt.Errorf("check resource release: %w", err)
+		} else if rows != 1 {
+			return fmt.Errorf("inconsistent resource allocation on node %q for workload %q", *nodeID, workloadID)
 		}
 	}
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workloads
-		SET
-			actual_state = $1,
-			updated_at = NOW()
-		WHERE id = $2
+		SET actual_state = $1,
+		    container_id = NULL,
+		    node_id = NULL,
+		    resource_reserved = FALSE,
+		    execution_state = $2,
+		    execution_error = '',
+		    updated_at = NOW()
+		WHERE id = $3
 	`,
 		model.WorkloadStopped,
+		model.ExecutionIdle,
 		workloadID,
 	)
 
@@ -754,6 +855,9 @@ func (p *Postgres) ListWorkloadsByNode(
 			deployment_version,
 			desired_state,
 			actual_state,
+			execution_state,
+			execution_error,
+			resource_reserved,
 			created_at,
 			updated_at
 		FROM workloads
@@ -785,6 +889,9 @@ func (p *Postgres) ListWorkloadsByNode(
 			&w.DeploymentVersion,
 			&w.DesiredState,
 			&w.ActualState,
+			&w.ExecutionState,
+			&w.ExecutionError,
+			&w.ResourceReserved,
 			&w.CreatedAt,
 			&w.UpdatedAt,
 		); err != nil {

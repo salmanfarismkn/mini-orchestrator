@@ -3,12 +3,15 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"mini-orchestrator/internal/runtime"
@@ -24,11 +27,16 @@ type Agent struct {
 	Client  *http.Client
 	Runtime runtime.Runtime
 
-	Token string
+	Token           string
+	RegistrationID  string
+	LeaseGeneration int64
+	Fenced          bool
+	leaseMu         sync.RWMutex
 }
 
 type registrationRequest struct {
 	ID             string `json:"id"`
+	RegistrationID string `json:"registration_id"`
 	Address        string `json:"address"`
 	CPUCapacity    int    `json:"cpu_capacity_millis"`
 	MemoryCapacity int    `json:"memory_capacity_mb"`
@@ -38,8 +46,26 @@ func (a *Agent) Register(ctx context.Context) error {
 	if err := a.validateControlPlaneURL(); err != nil {
 		return err
 	}
+
+	a.leaseMu.Lock()
+	if a.Fenced {
+		a.leaseMu.Unlock()
+		return fmt.Errorf("node agent %q is fenced and must not re-register", a.ID)
+	}
+	if a.RegistrationID == "" {
+		randomID := make([]byte, 16)
+		if _, err := rand.Read(randomID); err != nil {
+			a.leaseMu.Unlock()
+			return fmt.Errorf("generate registration id: %w", err)
+		}
+		a.RegistrationID = hex.EncodeToString(randomID)
+	}
+	registrationID := a.RegistrationID
+	a.leaseMu.Unlock()
+
 	payload := registrationRequest{
 		ID:             a.ID,
+		RegistrationID: registrationID,
 		Address:        a.Address,
 		CPUCapacity:    a.CPUCapacity,
 		MemoryCapacity: a.MemoryCapacity,
@@ -86,19 +112,47 @@ func (a *Agent) Register(ctx context.Context) error {
 		)
 	}
 
+	var response struct {
+		LeaseGeneration int64 `json:"lease_generation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return fmt.Errorf("decode registration response: %w", err)
+	}
+	if response.LeaseGeneration < 1 {
+		return fmt.Errorf("registration returned invalid lease generation %d", response.LeaseGeneration)
+	}
+
+	a.leaseMu.Lock()
+	a.LeaseGeneration = response.LeaseGeneration
+	a.Fenced = false
+	a.leaseMu.Unlock()
 	return nil
 }
 
 type heartbeatRequest struct {
-	ID string `json:"id"`
+	ID              string `json:"id"`
+	LeaseGeneration int64  `json:"lease_generation"`
 }
 
 func (a *Agent) Heartbeat(ctx context.Context) error {
 	if err := a.validateControlPlaneURL(); err != nil {
 		return err
 	}
+
+	a.leaseMu.RLock()
+	if a.Fenced {
+		a.leaseMu.RUnlock()
+		return fmt.Errorf("node agent %q is fenced; heartbeat stopped", a.ID)
+	}
+	leaseGeneration := a.LeaseGeneration
+	a.leaseMu.RUnlock()
+	if leaseGeneration < 1 {
+		return fmt.Errorf("node agent %q is not registered", a.ID)
+	}
+
 	payload := heartbeatRequest{
-		ID: a.ID,
+		ID:              a.ID,
+		LeaseGeneration: leaseGeneration,
 	}
 
 	body, err := json.Marshal(payload)
@@ -136,6 +190,12 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		a.leaseMu.Lock()
+		a.Fenced = true
+		a.leaseMu.Unlock()
+		return fmt.Errorf("node agent %q heartbeat rejected as stale generation %d", a.ID, leaseGeneration)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf(
 			"heartbeat failed with status %d",
@@ -158,6 +218,12 @@ func (a *Agent) RunHeartbeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		a.leaseMu.RLock()
+		fenced := a.Fenced
+		a.leaseMu.RUnlock()
+		if fenced {
+			return
+		}
 		if err := a.Heartbeat(ctx); err != nil {
 			slog.Error(
 				"node heartbeat failed",

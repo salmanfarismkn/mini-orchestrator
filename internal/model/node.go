@@ -11,14 +11,17 @@ const (
 )
 
 type Node struct {
-	ID              string
-	Address         string
-	CPUCapacity     int
-	MemoryCapacity  int
-	CPUAllocated    int
-	MemoryAllocated int
-	Status          NodeStatus
-	LastHeartbeat   time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                  string
+	CertificateIdentity string
+	LeaseGeneration     int64
+	RegistrationID      string
+	Address             string
+	CPUCapacity         int
+	MemoryCapacity      int
+	CPUAllocated        int
+	MemoryAllocated     int
+	Status              NodeStatus
+	LastHeartbeat       time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }

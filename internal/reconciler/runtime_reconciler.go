@@ -76,7 +76,7 @@ func (r *RuntimeReconciler) ReconcileNode(
 				continue
 			}
 
-			if err := r.store.UpdateWorkloadActualState(ctx, workload.ID, model.WorkloadStopped); err != nil {
+			if err := r.store.MarkWorkloadStoppedAndReleaseResources(ctx, workload.ID); err != nil {
 				return err
 			}
 			continue
@@ -85,6 +85,11 @@ func (r *RuntimeReconciler) ReconcileNode(
 		// Otherwise reconcile based on container status
 		state := containerState(container.Status)
 		if workload.ActualState == state {
+			if state == model.WorkloadRunning && workload.ExecutionState != model.ExecutionRunning {
+				if err := r.store.MarkWorkloadRunning(ctx, workload.ID, container.ID); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 
@@ -93,6 +98,10 @@ func (r *RuntimeReconciler) ReconcileNode(
 				return err
 			}
 			r.metrics.WorkloadFailed()
+		} else if state == model.WorkloadRunning && workload.DesiredState == model.WorkloadScheduled {
+			if err := r.store.MarkWorkloadRunning(ctx, workload.ID, container.ID); err != nil {
+				return err
+			}
 		} else {
 			if err := r.store.UpdateWorkloadActualState(ctx, workload.ID, state); err != nil {
 				return err
@@ -132,14 +141,19 @@ func (r *RuntimeReconciler) ReconcileNode(
 			"node_id", node.ID,
 		)
 
-		if err := r.store.MarkWorkloadFailedAndReleaseResources(
-			ctx,
-			workload.ID,
-		); err != nil {
-			return fmt.Errorf(
-				"mark missing workload failed: %w",
-				err,
-			)
+		if workload.DesiredState == model.WorkloadScheduled &&
+			(workload.ExecutionState == model.ExecutionStarting ||
+				workload.ExecutionState == model.ExecutionCreated ||
+				workload.ExecutionState == model.ExecutionRunning) {
+			if err := r.store.ResetExecutionIntent(ctx, workload.ID); err != nil {
+				return fmt.Errorf("reset missing workload execution: %w", err)
+			}
+			r.metrics.ContainerMissing()
+			continue
+		}
+
+		if err := r.store.MarkWorkloadFailedAndReleaseResources(ctx, workload.ID); err != nil {
+			return fmt.Errorf("mark missing workload failed: %w", err)
 		}
 		r.metrics.ContainerMissing()
 		r.metrics.WorkloadFailed()
