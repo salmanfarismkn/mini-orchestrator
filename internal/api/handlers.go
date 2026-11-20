@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,23 +17,101 @@ import (
 )
 
 type Server struct {
-	store     *store.Postgres
-	nodeToken string
-	metrics   *observability.Metrics
-	readiness observability.DatabaseChecker
+	store         *store.Postgres
+	nodeToken     string
+	operatorToken string
+	metrics       *observability.Metrics
+	readiness     observability.DatabaseChecker
 }
 
 func NewServer(
 	store *store.Postgres,
 	nodeToken string,
+	operatorToken string,
 	metrics *observability.Metrics,
 ) *Server {
-	return &Server{
-		store:     store,
-		nodeToken: nodeToken,
-		metrics:   metrics,
-		readiness: store,
+	if metrics == nil {
+		metrics = &observability.Metrics{}
 	}
+	metrics.SetOperationalSnapshotProvider(func(ctx context.Context) (observability.OperationalSnapshot, error) {
+		snapshot, err := store.GetOperationalMetrics(ctx)
+		if err != nil {
+			return observability.OperationalSnapshot{}, err
+		}
+		return observability.OperationalSnapshot{
+			ActiveDeployments:      snapshot.ActiveDeployments,
+			PendingDeployments:     snapshot.PendingDeployments,
+			ProgressingDeployments: snapshot.ProgressingDeployments,
+			AvailableDeployments:   snapshot.AvailableDeployments,
+			FailedDeployments:      snapshot.FailedDeployments,
+			DesiredReplicas:        snapshot.DesiredReplicas,
+			RunningReplicas:        snapshot.RunningReplicas,
+			FailedWorkloads:        snapshot.FailedWorkloads,
+			ReadyNodes:             snapshot.ReadyNodes,
+			UnhealthyNodes:         snapshot.UnhealthyNodes,
+			DrainingNodes:          snapshot.DrainingNodes,
+			ReservedCPUMillis:      snapshot.ReservedCPUMillis,
+			ReservedMemoryMB:       snapshot.ReservedMemoryMB,
+		}, nil
+	})
+	return &Server{
+		store:         store,
+		nodeToken:     nodeToken,
+		operatorToken: operatorToken,
+		metrics:       metrics,
+		readiness:     store,
+	}
+}
+
+type deploymentOperationalStatusResponse struct {
+	ServiceID                   string     `json:"service_id"`
+	DeploymentVersion           int        `json:"deployment_version"`
+	Status                      string     `json:"status"`
+	DesiredReplicas             int        `json:"desired_replicas"`
+	CurrentVersionWorkloadCount int64      `json:"current_version_workload_count"`
+	RunningReplicaCount         int64      `json:"running_replica_count"`
+	FailedReplicaCount          int64      `json:"failed_replica_count"`
+	ProgressPercent             float64    `json:"progress_percent"`
+	MaxSurge                    int        `json:"max_surge"`
+	MaxUnavailable              int        `json:"max_unavailable"`
+	DeploymentStartedAt         *time.Time `json:"deployment_started_at,omitempty"`
+	ServiceCreatedAt            time.Time  `json:"service_created_at"`
+	FailureReason               string     `json:"failure_reason,omitempty"`
+	ReadinessSupported          bool       `json:"readiness_supported"`
+}
+
+func (s *Server) getDeploymentOperationalStatus(w http.ResponseWriter, r *http.Request) {
+	serviceID := r.PathValue("id")
+	if serviceID == "" {
+		writeError(w, http.StatusBadRequest, "service id is required")
+		return
+	}
+	status, err := s.store.GetDeploymentOperationalStatus(r.Context(), serviceID)
+	if err != nil {
+		if errors.Is(err, store.ErrServiceNotFound) {
+			writeError(w, http.StatusNotFound, "service not found")
+			return
+		}
+		slog.Error("failed to read deployment status", "service_id", serviceID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to read deployment status")
+		return
+	}
+	writeJSON(w, http.StatusOK, deploymentOperationalStatusResponse{
+		ServiceID:                   status.ServiceID,
+		DeploymentVersion:           status.DeploymentVersion,
+		Status:                      string(status.DeploymentStatus),
+		DesiredReplicas:             status.DesiredReplicas,
+		CurrentVersionWorkloadCount: status.CurrentVersionWorkloadCount,
+		RunningReplicaCount:         status.RunningReplicaCount,
+		FailedReplicaCount:          status.FailedReplicaCount,
+		ProgressPercent:             status.ProgressPercent,
+		MaxSurge:                    status.MaxSurge,
+		MaxUnavailable:              status.MaxUnavailable,
+		DeploymentStartedAt:         status.DeploymentStartedAt,
+		ServiceCreatedAt:            status.ServiceCreatedAt,
+		FailureReason:               string(status.DeploymentFailureReason),
+		ReadinessSupported:          false,
+	})
 }
 
 type updateServiceRequest struct {
@@ -101,6 +180,99 @@ type heartbeatResponse struct {
 	Status          string    `json:"status"`
 	LeaseGeneration int64     `json:"lease_generation"`
 	Timestamp       time.Time `json:"timestamp"`
+}
+
+type nodeStateResponse struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+type nodeOperationalStatusResponse struct {
+	ID                    string    `json:"id"`
+	Status                string    `json:"status"`
+	Schedulable           bool      `json:"schedulable"`
+	AssignedWorkloadCount int       `json:"assigned_workload_count"`
+	ReservedCPU           int       `json:"reserved_cpu_millis"`
+	ReservedMemory        int       `json:"reserved_memory_mb"`
+	AvailableCPU          int       `json:"available_cpu_millis"`
+	AvailableMemory       int       `json:"available_memory_mb"`
+	Empty                 bool      `json:"empty"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+func (s *Server) getNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "node id is required")
+		return
+	}
+
+	status, err := s.store.GetNodeOperationalStatus(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNodeNotFound) {
+			writeError(w, http.StatusNotFound, "node not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to read node status")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, nodeOperationalStatusResponse{
+		ID:                    status.Node.ID,
+		Status:                string(status.Node.Status),
+		Schedulable:           status.Schedulable,
+		AssignedWorkloadCount: status.AssignedWorkloadCount,
+		ReservedCPU:           status.ReservedCPU,
+		ReservedMemory:        status.ReservedMemory,
+		AvailableCPU:          status.AvailableCPU,
+		AvailableMemory:       status.AvailableMemory,
+		Empty:                 status.Empty,
+		CreatedAt:             status.Node.CreatedAt,
+		UpdatedAt:             status.Node.UpdatedAt,
+	})
+}
+
+func (s *Server) drainNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "node id is required")
+		return
+	}
+	node, err := s.store.DrainNode(r.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNodeNotFound):
+			writeError(w, http.StatusNotFound, "node not found")
+		case errors.Is(err, store.ErrInvalidNodeTransition):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to drain node")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, nodeStateResponse{ID: node.ID, Status: string(node.Status)})
+}
+
+func (s *Server) reactivateNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "node id is required")
+		return
+	}
+	node, err := s.store.ReactivateNode(r.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNodeNotFound):
+			writeError(w, http.StatusNotFound, "node not found")
+		case errors.Is(err, store.ErrInvalidNodeTransition):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to reactivate node")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, nodeStateResponse{ID: node.ID, Status: string(node.Status)})
 }
 
 type createServiceRequest struct {
@@ -244,11 +416,17 @@ func (s *Server) heartbeat(
 		return
 	}
 
+	persisted, err := s.store.GetNode(r.Context(), req.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read node status")
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 
 	_ = json.NewEncoder(w).Encode(heartbeatResponse{
 		ID:              req.ID,
-		Status:          string(model.NodeReady),
+		Status:          string(persisted.Status),
 		LeaseGeneration: req.LeaseGeneration,
 		Timestamp:       now,
 	})
@@ -328,12 +506,18 @@ func (s *Server) registerNode(
 		return
 	}
 
+	persisted, err := s.store.GetNode(r.Context(), node.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read node status")
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 
 	_ = json.NewEncoder(w).Encode(registerNodeResponse{
 		ID:              node.ID,
-		Status:          string(node.Status),
+		Status:          string(persisted.Status),
 		LeaseGeneration: leaseGeneration,
 	})
 }
@@ -465,14 +649,17 @@ func (s *Server) updateService(
 
 	var req updateServiceRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
 	if req.Replicas < 0 ||
 		req.CPURequestMillis <= 0 ||
-		req.MemoryRequestMB <= 0 {
+		req.MemoryRequestMB <= 0 ||
+		req.MaxSurge < 0 ||
+		req.MaxUnavailable < 0 ||
+		(req.MaxSurge == 0 && req.MaxUnavailable == 0 && req.Replicas > 0) {
 		writeError(w, http.StatusBadRequest, "invalid service configuration")
 		return
 	}

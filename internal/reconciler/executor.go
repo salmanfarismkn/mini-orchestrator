@@ -22,11 +22,11 @@ type workloadExecutionStore interface {
 }
 
 type workloadNodeClient interface {
-	CreateContainer(context.Context, string, runtime.ContainerConfig) (runtime.Container, error)
-	StartContainer(context.Context, string, string) error
-	StopContainer(context.Context, string, string) error
-	DeleteContainer(context.Context, string, string) error
-	GetContainer(context.Context, string, string) (runtime.Container, error)
+	CreateContainer(context.Context, string, string, runtime.ContainerConfig) (runtime.Container, error)
+	StartContainer(context.Context, string, string, string) error
+	StopContainer(context.Context, string, string, string) error
+	DeleteContainer(context.Context, string, string, string) error
+	GetContainer(context.Context, string, string, string) (runtime.Container, error)
 }
 
 type WorkloadExecutor struct {
@@ -74,6 +74,7 @@ func (e *WorkloadExecutor) Execute(
 		containerName := "workload-" + workload.ID
 		container, err := e.nodeClient.CreateContainer(
 			ctx,
+			node.ID,
 			node.Address,
 			runtime.ContainerConfig{
 				Name:       containerName,
@@ -100,12 +101,12 @@ func (e *WorkloadExecutor) Execute(
 		}
 	}
 
-	if err := e.nodeClient.StartContainer(ctx, node.Address, containerID); err != nil {
+	if err := e.nodeClient.StartContainer(ctx, node.ID, node.Address, containerID); err != nil {
 		_ = e.store.SetExecutionError(ctx, workload.ID, model.ExecutionCreated, err.Error())
 		return fmt.Errorf("start container: %w", err)
 	}
 
-	container, err := e.nodeClient.GetContainer(ctx, node.Address, containerID)
+	container, err := e.nodeClient.GetContainer(ctx, node.ID, node.Address, containerID)
 	if err != nil {
 		_ = e.store.SetExecutionError(ctx, workload.ID, model.ExecutionCreated, err.Error())
 		return fmt.Errorf("inspect started container: %w", err)
@@ -159,6 +160,7 @@ func (e *WorkloadExecutor) Stop(
 
 	if err := e.nodeClient.StopContainer(
 		ctx,
+		node.ID,
 		node.Address,
 		containerID,
 	); err != nil {
@@ -171,6 +173,7 @@ func (e *WorkloadExecutor) Stop(
 
 	if err := e.nodeClient.DeleteContainer(
 		ctx,
+		node.ID,
 		node.Address,
 		containerID,
 	); err != nil {

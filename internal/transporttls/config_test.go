@@ -43,6 +43,12 @@ func TestLoadRequiresValidMutualTLSMaterial(t *testing.T) {
 	if err := ValidateServerName(serverTLS, "worker.invalid"); err == nil {
 		t.Fatal("server certificate accepted an address outside its SANs")
 	}
+	if err := ValidateURIIdentity(serverTLS, NodeCertificateIdentity("worker-01")); err != nil {
+		t.Fatalf("validate node certificate identity: %v", err)
+	}
+	if err := ValidateURIIdentity(serverTLS, ControlPlaneCertificateIdentity); err == nil {
+		t.Fatal("node certificate accepted as control-plane identity")
+	}
 	if _, _, err := Load(certFile, keyFile, filepath.Join(t.TempDir(), "missing-ca.pem")); err == nil {
 		t.Fatal("Load succeeded with missing CA file")
 	}

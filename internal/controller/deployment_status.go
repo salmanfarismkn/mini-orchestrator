@@ -104,10 +104,10 @@ func (c *DeploymentStatusController) ReconcileService(
 				"error", "current-version workload failed",
 			)
 		}
-		return c.store.UpdateDeploymentStatus(
+		return c.store.UpdateDeploymentFailure(
 			ctx,
 			service.ID,
-			model.DeploymentFailed,
+			model.DeploymentFailureWorkloadFailed,
 		)
 	}
 
@@ -124,10 +124,10 @@ func (c *DeploymentStatusController) ReconcileService(
 			)
 		}
 
-		return c.store.UpdateDeploymentStatus(
+		return c.store.UpdateDeploymentFailure(
 			ctx,
 			service.ID,
-			model.DeploymentFailed,
+			model.DeploymentFailureTimeout,
 		)
 	}
 

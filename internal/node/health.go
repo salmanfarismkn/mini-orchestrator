@@ -51,31 +51,36 @@ func (h *HealthChecker) check(ctx context.Context) {
 	}
 
 	now := time.Now().UTC()
+	heartbeatCutoff := now.Add(-h.timeout)
 
 	for _, node := range nodes {
+		if node.Status == model.NodeDraining {
+			continue
+		}
 		if !node.LastHeartbeat.IsZero() &&
 			now.Sub(node.LastHeartbeat) <= h.timeout {
 			continue
 		}
 
-		if node.Status != model.NodeUnhealthy {
+		markedUnhealthy, err := h.store.MarkNodeUnhealthyIfHeartbeatBefore(
+			ctx,
+			node.ID,
+			heartbeatCutoff,
+		)
+		if err != nil {
+			slog.Error(
+				"failed to mark node unhealthy",
+				"node_id", node.ID,
+				"error", err,
+			)
+			continue
+		}
+		if markedUnhealthy && node.Status != model.NodeUnhealthy {
 			slog.Warn(
 				"node marked unhealthy",
 				"node_id", node.ID,
 				"state", model.NodeUnhealthy,
 			)
-
-			if err := h.store.SetNodeStatus(
-				ctx,
-				node.ID,
-				model.NodeUnhealthy,
-			); err != nil {
-				slog.Error(
-					"failed to mark node unhealthy",
-					"node_id", node.ID,
-					"error", err,
-				)
-			}
 		}
 	}
 }

@@ -64,11 +64,15 @@ func (c *DeploymentController) ReconcileService(
 
 	// First create a replacement if we have surge capacity.
 	if totalActive < maxTotal {
-		if err := c.createReplacementWorkload(
+		created, err := c.createReplacementWorkload(
 			ctx,
 			service,
-		); err != nil {
+		)
+		if err != nil {
 			return err
+		}
+		if !created {
+			return nil
 		}
 
 		slog.Info(
@@ -177,7 +181,7 @@ func isActive(workload model.Workload) bool {
 func (c *DeploymentController) createReplacementWorkload(
 	ctx context.Context,
 	service model.Service,
-) error {
+) (bool, error) {
 	workload := model.Workload{
 		ID:                newWorkloadID(),
 		ServiceID:         service.ID,
@@ -189,14 +193,19 @@ func (c *DeploymentController) createReplacementWorkload(
 		ActualState:       model.WorkloadPending,
 	}
 
-	if err := c.store.CreatePendingWorkload(
+	created, err := c.store.CreatePendingWorkloadIfBelowActiveLimit(
 		ctx,
 		workload,
-	); err != nil {
-		return fmt.Errorf(
+		service.DesiredReplicas+service.MaxSurge,
+	)
+	if err != nil {
+		return false, fmt.Errorf(
 			"create replacement workload: %w",
 			err,
 		)
+	}
+	if !created {
+		return false, nil
 	}
 
 	slog.Info(
@@ -207,5 +216,5 @@ func (c *DeploymentController) createReplacementWorkload(
 		"state", model.WorkloadPending,
 	)
 
-	return nil
+	return true, nil
 }

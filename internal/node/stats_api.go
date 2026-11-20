@@ -2,8 +2,11 @@ package node
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+
+	"mini-orchestrator/internal/runtime"
 )
 
 func (a *Agent) stats(
@@ -15,12 +18,17 @@ func (a *Agent) stats(
 	stats, err := a.Runtime.Stats(
 		r.Context(),
 		containerID,
+		a.ID,
 	)
 	if err != nil {
+		if errors.Is(err, runtime.ErrContainerNotFound) || errors.Is(err, runtime.ErrContainerNotOwned) {
+			http.Error(w, "container not found", http.StatusNotFound)
+			return
+		}
 		slog.Error("container stats failed", "container_id", containerID, "error", err)
 		http.Error(
 			w,
-			err.Error(),
+			"failed to retrieve container stats",
 			http.StatusInternalServerError,
 		)
 		return

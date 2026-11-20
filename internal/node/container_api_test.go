@@ -64,18 +64,18 @@ func (r failingRuntime) Create(context.Context, runtime.ContainerConfig) (runtim
 	return runtime.Container{}, r.err
 }
 
-func (r failingRuntime) Start(context.Context, string) error { return r.err }
-func (r failingRuntime) Stop(context.Context, string) error  { return r.err }
-func (r failingRuntime) Remove(context.Context, string) error {
+func (r failingRuntime) Start(context.Context, string, string) error { return r.err }
+func (r failingRuntime) Stop(context.Context, string, string) error  { return r.err }
+func (r failingRuntime) Remove(context.Context, string, string) error {
 	return r.err
 }
-func (r failingRuntime) Inspect(context.Context, string) (runtime.Container, error) {
+func (r failingRuntime) Inspect(context.Context, string, string) (runtime.Container, error) {
 	return runtime.Container{}, r.err
 }
-func (r failingRuntime) List(context.Context) ([]runtime.Container, error) {
+func (r failingRuntime) List(context.Context, string) ([]runtime.Container, error) {
 	return nil, r.err
 }
-func (r failingRuntime) Stats(context.Context, string) (runtime.ContainerStats, error) {
+func (r failingRuntime) Stats(context.Context, string, string) (runtime.ContainerStats, error) {
 	return runtime.ContainerStats{}, r.err
 }
 
@@ -114,5 +114,33 @@ func TestStopDoesNotHideNonNotFoundRuntimeErrors(t *testing.T) {
 	agent.InspectContainer(response, request)
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("inspect status = %d; want %d", response.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestContainerOperationsReturnNotFoundForForeignWorkload(t *testing.T) {
+	agent := &Agent{
+		ID:      "worker-01",
+		Runtime: failingRuntime{err: runtime.ErrContainerNotOwned},
+	}
+	for _, test := range []struct {
+		name    string
+		method  string
+		path    string
+		handler func(*Agent, http.ResponseWriter, *http.Request)
+	}{
+		{name: "start", method: http.MethodPost, path: "/containers/foreign/start", handler: (*Agent).StartContainer},
+		{name: "stop", method: http.MethodPost, path: "/containers/foreign/stop", handler: (*Agent).StopContainer},
+		{name: "remove", method: http.MethodDelete, path: "/containers/foreign", handler: (*Agent).RemoveContainer},
+		{name: "inspect", method: http.MethodGet, path: "/containers/foreign", handler: (*Agent).InspectContainer},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.SetPathValue("id", "foreign")
+			response := httptest.NewRecorder()
+			test.handler(agent, response, request)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("status = %d; want %d", response.Code, http.StatusNotFound)
+			}
+		})
 	}
 }

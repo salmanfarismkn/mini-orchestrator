@@ -92,7 +92,7 @@ function Issue-Certificate {
 }
 
 Issue-Certificate -Name "control-plane" -CertificatePath $controlPlaneCert `
-    -PrivateKeyPath $controlPlaneKey -Uris @()
+    -PrivateKeyPath $controlPlaneKey -Uris @("spiffe://mini-orchestrator/control-plane")
 
 foreach ($nodeId in $NodeIds) {
     Issue-Certificate -Name $nodeId `
@@ -103,6 +103,10 @@ foreach ($nodeId in $NodeIds) {
 
 Write-Host "Development CA: $caCert"
 Write-Host "Control-plane certificate: $controlPlaneCert"
+Write-Host "Control-plane identity: spiffe://mini-orchestrator/control-plane"
+& openssl x509 -in $controlPlaneCert -noout -text |
+    Select-String -Pattern 'URI:spiffe://mini-orchestrator/control-plane', 'TLS Web Client Authentication' |
+    ForEach-Object { Write-Host "  $($_.Line.Trim())" }
 foreach ($nodeId in $NodeIds) {
     $cert = Join-Path $OutputDir "$nodeId.pem"
     $key = Join-Path $OutputDir "$nodeId-key.pem"

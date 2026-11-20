@@ -219,6 +219,10 @@ func TestFailedAndTimedOutDeploymentAcceptanceIntegration(t *testing.T) {
 	if service.DeploymentStatus != model.DeploymentFailed {
 		t.Fatalf("deployment status = %q; want FAILED", service.DeploymentStatus)
 	}
+	if service.DeploymentFailureReason != model.DeploymentFailureWorkloadFailed {
+		t.Fatalf("deployment failure reason = %q; want %q",
+			service.DeploymentFailureReason, model.DeploymentFailureWorkloadFailed)
+	}
 	if err := deployment.ReconcileService(ctx, service); err != nil {
 		t.Fatalf("reconcile terminal failed deployment: %v", err)
 	}
@@ -273,6 +277,10 @@ func TestFailedAndTimedOutDeploymentAcceptanceIntegration(t *testing.T) {
 	}
 	if timedOut.DeploymentStatus != model.DeploymentFailed {
 		t.Fatalf("timed-out deployment status = %q; want FAILED", timedOut.DeploymentStatus)
+	}
+	if timedOut.DeploymentFailureReason != model.DeploymentFailureTimeout {
+		t.Fatalf("timed-out deployment failure reason = %q; want %q",
+			timedOut.DeploymentFailureReason, model.DeploymentFailureTimeout)
 	}
 }
 

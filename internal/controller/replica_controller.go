@@ -60,8 +60,12 @@ func (c *ReplicaController) ReconcileService(
 				ActualState:       model.WorkloadPending,
 			}
 
-			if err := c.store.CreatePendingWorkload(ctx, workload); err != nil {
+			created, err := c.store.CreatePendingWorkloadIfBelowActiveLimit(ctx, workload, service.DesiredReplicas)
+			if err != nil {
 				return fmt.Errorf("create pending workload: %w", err)
+			}
+			if !created {
+				break
 			}
 			slog.Info(
 				"replica created",

@@ -13,6 +13,19 @@ import (
 var ErrNodeIdentityNotBound = errors.New("node identity is not enrolled")
 var ErrNodeIdentityMismatch = errors.New("authenticated certificate identity does not match node")
 var ErrNodeLeaseStale = errors.New("node lease generation is stale")
+var ErrNodeNotFound = errors.New("node not found")
+var ErrInvalidNodeTransition = errors.New("invalid node state transition")
+
+type NodeOperationalStatus struct {
+	Node                  model.Node
+	Schedulable           bool
+	AssignedWorkloadCount int
+	ReservedCPU           int
+	ReservedMemory        int
+	AvailableCPU          int
+	AvailableMemory       int
+	Empty                 bool
+}
 
 func (p *Postgres) RegisterNode(ctx context.Context, node model.Node, certificateIdentity, registrationID string) (int64, error) {
 	if registrationID == "" {
@@ -72,7 +85,7 @@ func (p *Postgres) RegisterNode(ctx context.Context, node model.Node, certificat
 		SET address = $2,
 			cpu_capacity_millis = $3,
 			memory_capacity_mb = $4,
-			status = $5,
+			status = CASE WHEN status = 'DRAINING' THEN 'DRAINING' ELSE $5 END,
 			last_heartbeat = $6,
 			lease_generation = $7,
 			registration_id = $8,
@@ -150,10 +163,69 @@ func (p *Postgres) GetNode(ctx context.Context, id string) (model.Node, error) {
 	}
 
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Node{}, fmt.Errorf("%w: node %q", ErrNodeNotFound, id)
+		}
 		return model.Node{}, fmt.Errorf("get node %q: %w", id, err)
 	}
 
 	return node, nil
+}
+
+func (p *Postgres) GetNodeOperationalStatus(ctx context.Context, id string) (NodeOperationalStatus, error) {
+	const query = `
+		SELECT
+			n.id,
+			n.address,
+			n.cpu_capacity_millis,
+			n.memory_capacity_mb,
+			n.cpu_allocated_millis,
+			n.memory_allocated_mb,
+			n.status,
+			n.created_at,
+			n.updated_at,
+			COUNT(w.id)::INTEGER
+		FROM nodes n
+		LEFT JOIN workloads w ON w.node_id = n.id
+		WHERE n.id = $1
+		GROUP BY
+			n.id,
+			n.address,
+			n.cpu_capacity_millis,
+			n.memory_capacity_mb,
+			n.cpu_allocated_millis,
+			n.memory_allocated_mb,
+			n.status,
+			n.created_at,
+			n.updated_at
+	`
+
+	var status NodeOperationalStatus
+	if err := p.db.QueryRowContext(ctx, query, id).Scan(
+		&status.Node.ID,
+		&status.Node.Address,
+		&status.Node.CPUCapacity,
+		&status.Node.MemoryCapacity,
+		&status.Node.CPUAllocated,
+		&status.Node.MemoryAllocated,
+		&status.Node.Status,
+		&status.Node.CreatedAt,
+		&status.Node.UpdatedAt,
+		&status.AssignedWorkloadCount,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NodeOperationalStatus{}, fmt.Errorf("%w: node %q", ErrNodeNotFound, id)
+		}
+		return NodeOperationalStatus{}, fmt.Errorf("get operational status for node %q: %w", id, err)
+	}
+
+	status.Schedulable = status.Node.Status == model.NodeReady
+	status.ReservedCPU = status.Node.CPUAllocated
+	status.ReservedMemory = status.Node.MemoryAllocated
+	status.AvailableCPU = status.Node.CPUCapacity - status.ReservedCPU
+	status.AvailableMemory = status.Node.MemoryCapacity - status.ReservedMemory
+	status.Empty = status.AssignedWorkloadCount == 0
+	return status, nil
 }
 
 func (p *Postgres) ListNodes(ctx context.Context) ([]model.Node, error) {
@@ -241,7 +313,7 @@ func (p *Postgres) UpdateHeartbeat(
 	const query = `
 		UPDATE nodes
 		SET
-			status = $3,
+			status = CASE WHEN status = 'DRAINING' THEN 'DRAINING' ELSE $3 END,
 			last_heartbeat = $4,
 			updated_at = NOW()
 		WHERE id = $1
@@ -294,6 +366,7 @@ func (p *Postgres) SetNodeStatus(
 			status = $2,
 			updated_at = NOW()
 		WHERE id = $1
+		  AND ($2 != 'UNHEALTHY' OR status != 'DRAINING')
 	`
 
 	result, err := p.db.ExecContext(
@@ -323,4 +396,103 @@ func (p *Postgres) SetNodeStatus(
 	}
 
 	return nil
+}
+
+func (p *Postgres) MarkNodeUnhealthyIfHeartbeatBefore(
+	ctx context.Context,
+	id string,
+	cutoff time.Time,
+) (bool, error) {
+	result, err := p.db.ExecContext(ctx, `
+		UPDATE nodes
+		SET status = $2,
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND status <> $3
+		  AND (last_heartbeat IS NULL OR last_heartbeat < $4)
+	`, id, model.NodeUnhealthy, model.NodeDraining, cutoff)
+	if err != nil {
+		return false, fmt.Errorf("mark node %q unhealthy if heartbeat is stale: %w", id, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check stale heartbeat transition for node %q: %w", id, err)
+	}
+	return rows == 1, nil
+}
+
+func (p *Postgres) DrainNode(ctx context.Context, id string) (model.Node, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Node{}, fmt.Errorf("begin node drain: %w", err)
+	}
+	defer tx.Rollback()
+
+	var current model.NodeStatus
+	if err := tx.QueryRowContext(ctx,
+		`SELECT status FROM nodes WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Node{}, fmt.Errorf("%w: node %q", ErrNodeNotFound, id)
+		}
+		return model.Node{}, fmt.Errorf("lock node %q for drain: %w", id, err)
+	}
+
+	switch current {
+	case model.NodeDraining:
+		// Repeated drain requests are idempotent.
+	case model.NodeReady, model.NodeUnhealthy:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE nodes SET status = 'DRAINING', updated_at = NOW() WHERE id = $1`, id,
+		); err != nil {
+			return model.Node{}, fmt.Errorf("drain node %q: %w", id, err)
+		}
+		current = model.NodeDraining
+	default:
+		return model.Node{}, fmt.Errorf("%w: node %q cannot transition from %s to DRAINING", ErrInvalidNodeTransition, id, current)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Node{}, fmt.Errorf("commit node drain: %w", err)
+	}
+	return model.Node{ID: id, Status: current}, nil
+}
+
+func (p *Postgres) ReactivateNode(ctx context.Context, id string) (model.Node, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Node{}, fmt.Errorf("begin node reactivation: %w", err)
+	}
+	defer tx.Rollback()
+
+	var current model.NodeStatus
+	if err := tx.QueryRowContext(ctx,
+		`SELECT status FROM nodes WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Node{}, fmt.Errorf("%w: node %q", ErrNodeNotFound, id)
+		}
+		return model.Node{}, fmt.Errorf("lock node %q for reactivation: %w", id, err)
+	}
+
+	switch current {
+	case model.NodeReady:
+		// Repeated reactivation requests are idempotent.
+	case model.NodeDraining:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE nodes SET status = 'READY', updated_at = NOW() WHERE id = $1`, id,
+		); err != nil {
+			return model.Node{}, fmt.Errorf("reactivate node %q: %w", id, err)
+		}
+		current = model.NodeReady
+	case model.NodeUnhealthy:
+		return model.Node{}, fmt.Errorf("%w: node %q is UNHEALTHY and cannot be reactivated", ErrInvalidNodeTransition, id)
+	default:
+		return model.Node{}, fmt.Errorf("%w: node %q cannot be reactivated from %s", ErrInvalidNodeTransition, id, current)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Node{}, fmt.Errorf("commit node reactivation: %w", err)
+	}
+	return model.Node{ID: id, Status: current}, nil
 }

@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -39,14 +42,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	nodeToken := os.Getenv("ORCHESTRATOR_NODE_TOKEN")
-	if nodeToken == "" {
-		slog.Error("node authentication configuration is missing")
+	nodeToken, operatorToken, err := loadAuthTokens(os.Getenv)
+	if err != nil {
+		slog.Error("authentication configuration is invalid", "error", err)
 		os.Exit(1)
 	}
 	serverTLS, clientTLS, err := transporttls.LoadFromEnv()
 	if err != nil {
 		slog.Error("mutual TLS configuration failed", "error", err)
+		os.Exit(1)
+	}
+	if err := transporttls.ValidateURIIdentity(serverTLS, transporttls.ControlPlaneCertificateIdentity); err != nil {
+		slog.Error("control-plane certificate identity is invalid", "error", err)
 		os.Exit(1)
 	}
 	serverTLS = serverTLS.Clone()
@@ -74,7 +81,9 @@ func main() {
 
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	appCtx, cancelApp := context.WithCancel(rootCtx)
+	appCtx, cancelApp := context.WithCancel(context.WithoutCancel(rootCtx))
+	serverBaseCtx, cancelServerBase := context.WithCancel(context.WithoutCancel(rootCtx))
+	defer cancelServerBase()
 	var backgroundWG sync.WaitGroup
 
 	healthChecker := node.NewHealthChecker(
@@ -154,6 +163,7 @@ func main() {
 	server := api.NewServer(
 		db,
 		nodeToken,
+		operatorToken,
 		apiMetrics,
 	)
 
@@ -161,6 +171,9 @@ func main() {
 		Addr:      ":8080",
 		Handler:   server.Routes(),
 		TLSConfig: serverTLS,
+		BaseContext: func(net.Listener) context.Context {
+			return serverBaseCtx
+		},
 	}
 	httpconfig.Apply(httpServer)
 
@@ -186,10 +199,13 @@ func main() {
 	cancelApp()
 
 	shutdownErr := httpconfig.ShutdownGracefully(httpServer, shutdownTimeout)
+	nodeClient.CloseIdleConnections()
+	httpShutdownComplete := shutdownErr == nil
 	if shutdownErr != nil {
 		shutdownRequested = false
 		slog.Error("control plane HTTP shutdown did not complete gracefully", "error", shutdownErr)
 	}
+	cancelServerBase()
 
 	waitDone := make(chan struct{})
 	go func() {
@@ -208,7 +224,7 @@ func main() {
 		slog.Error("control plane background components did not stop within shutdown timeout")
 	}
 
-	if backgroundStopped {
+	if backgroundStopped && httpShutdownComplete {
 		if err := db.Close(); err != nil {
 			shutdownRequested = false
 			slog.Error("control plane database close failed", "error", err)
@@ -225,4 +241,19 @@ func main() {
 	if !shutdownRequested {
 		return
 	}
+}
+
+func loadAuthTokens(getenv func(string) string) (string, string, error) {
+	nodeToken := strings.TrimSpace(getenv("ORCHESTRATOR_NODE_TOKEN"))
+	operatorToken := strings.TrimSpace(getenv("ORCHESTRATOR_OPERATOR_TOKEN"))
+	if nodeToken == "" {
+		return "", "", errors.New("node authentication configuration is missing")
+	}
+	if operatorToken == "" {
+		return "", "", errors.New("operator authentication configuration is missing")
+	}
+	if operatorToken == nodeToken {
+		return "", "", errors.New("operator and node authentication tokens must be distinct")
+	}
+	return nodeToken, operatorToken, nil
 }

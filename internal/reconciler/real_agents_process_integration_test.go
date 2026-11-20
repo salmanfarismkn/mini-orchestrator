@@ -114,11 +114,6 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 	serviceID := integrationID(t, "real-process-service")
 	agentIDs := []string{"worker-01", "worker-02"}
 	env.cleanupTestData(t, serviceID, agentIDs...)
-	for _, fakeNode := range env.nodes {
-		if err := env.store.SetNodeStatus(ctx, fakeNode.ID, model.NodeDraining); err != nil {
-			t.Fatalf("drain in-process test node %q: %v", fakeNode.ID, err)
-		}
-	}
 
 	moduleRoot := integrationModuleRoot(t)
 	tempDir := t.TempDir()
@@ -131,11 +126,12 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 		tempDir,
 		controlPlaneBinary,
 		map[string]string{
-			"DATABASE_URL":               env.dsn,
-			"ORCHESTRATOR_NODE_TOKEN":    env.token,
-			"ORCHESTRATOR_TLS_CERT_FILE": env.tlsFiles.certificate,
-			"ORCHESTRATOR_TLS_KEY_FILE":  env.tlsFiles.privateKey,
-			"ORCHESTRATOR_TLS_CA_FILE":   env.tlsFiles.ca,
+			"DATABASE_URL":                env.dsn,
+			"ORCHESTRATOR_NODE_TOKEN":     env.token,
+			"ORCHESTRATOR_OPERATOR_TOKEN": env.operatorToken,
+			"ORCHESTRATOR_TLS_CERT_FILE":  env.tlsFiles.certificate,
+			"ORCHESTRATOR_TLS_KEY_FILE":   env.tlsFiles.privateKey,
+			"ORCHESTRATOR_TLS_CA_FILE":    env.tlsFiles.ca,
 		},
 	))
 	if err != nil {
@@ -177,18 +173,20 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 		for _, workload := range workloads {
 			names["workload-"+workload.ID] = struct{}{}
 		}
-		containers, err := dockerRuntime.List(cleanupCtx)
-		if err != nil {
-			t.Errorf("list orchestrator containers for test cleanup: %v", err)
-			return
-		}
-		for _, container := range containers {
-			if _, owned := names[container.Name]; !owned {
+		for _, nodeID := range []string{"worker-01", "worker-02"} {
+			containers, err := dockerRuntime.List(cleanupCtx, nodeID)
+			if err != nil {
+				t.Errorf("list orchestrator containers for node %q test cleanup: %v", nodeID, err)
 				continue
 			}
-			if err := dockerRuntime.Remove(cleanupCtx, container.ID); err != nil &&
-				!errors.Is(err, orchestratorRuntime.ErrContainerNotFound) {
-				t.Errorf("remove test-created container %q: %v", container.ID, err)
+			for _, container := range containers {
+				if _, owned := names[container.Name]; !owned {
+					continue
+				}
+				if err := dockerRuntime.Remove(cleanupCtx, container.ID, nodeID); err != nil &&
+					!errors.Is(err, orchestratorRuntime.ErrContainerNotFound) {
+					t.Errorf("remove test-created container %q: %v", container.ID, err)
+				}
 			}
 		}
 	})
@@ -200,6 +198,10 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 	for _, agentID := range agentIDs {
 		port := availablePort(t)
 		address := net.JoinHostPort("127.0.0.1", port)
+		nodeTLSFiles, ok := env.tlsFiles.nodes[agentID]
+		if !ok {
+			t.Fatalf("missing TLS files for integration node %q", agentID)
+		}
 		command := newProcessCommand(
 			tempDir,
 			nodeAgentBinary,
@@ -211,9 +213,9 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 				"ORCHESTRATOR_NODE_MEMORY_MB":    "512",
 				"ORCHESTRATOR_CONTROL_PLANE_URL": controlPlaneURL,
 				"ORCHESTRATOR_NODE_TOKEN":        env.token,
-				"ORCHESTRATOR_TLS_CERT_FILE":     env.tlsFiles.certificate,
-				"ORCHESTRATOR_TLS_KEY_FILE":      env.tlsFiles.privateKey,
-				"ORCHESTRATOR_TLS_CA_FILE":       env.tlsFiles.ca,
+				"ORCHESTRATOR_TLS_CERT_FILE":     nodeTLSFiles.certificate,
+				"ORCHESTRATOR_TLS_KEY_FILE":      nodeTLSFiles.privateKey,
+				"ORCHESTRATOR_TLS_CA_FILE":       nodeTLSFiles.ca,
 			},
 		)
 		process, err := startManagedProcess(command)
@@ -226,7 +228,8 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 
 		pollUntil(t, ctx, 15*time.Second, func() (bool, error) {
 			if processErr, exited := processExitError(process); exited {
-				return false, fmt.Errorf("real agent %q exited during startup: %v", agentID, processErr)
+				return false, fmt.Errorf("real agent %q exited during startup: %v\n%s",
+					agentID, processErr, strings.TrimSpace(process.output.String()))
 			}
 			registered, err := env.store.GetNode(ctx, agentID)
 			if err != nil {
@@ -238,7 +241,7 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 				registered.MemoryCapacity != 512 {
 				return false, nil
 			}
-			_, err = env.nodeClient().ListContainers(ctx, address)
+			_, err = env.nodeClient().ListContainers(ctx, agentID, address)
 			return err == nil, nil
 		})
 	}
@@ -275,7 +278,7 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create service request: %v", err)
 	}
-	request.Header.Set("Authorization", "Bearer "+env.token)
+	request.Header.Set("Authorization", "Bearer "+env.operatorToken)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
@@ -305,6 +308,7 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 		t.Fatalf("list real-agent workloads: %v", err)
 	}
 	assertProcessAgentPlacement(t, ctx, env, workloads, agentIDs)
+	assertAllocationsMatchActiveWorkloads(t, ctx, env, serviceID)
 	existingWorkloadIDs := make(map[string]struct{}, len(workloads))
 	for _, workload := range workloads {
 		existingWorkloadIDs[workload.ID] = struct{}{}
@@ -314,7 +318,10 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 		t.Fatal("running workload has no Docker container ID")
 	}
 	missingContainerID := *missingWorkload.ContainerID
-	if err := dockerRuntime.Remove(ctx, missingContainerID); err != nil {
+	if missingWorkload.NodeID == nil {
+		t.Fatal("running workload has no assigned node ID")
+	}
+	if err := dockerRuntime.Remove(ctx, missingContainerID, *missingWorkload.NodeID); err != nil {
 		t.Fatalf("remove test-created container before recovery: %v", err)
 	}
 	var replacementWorkload model.Workload
@@ -327,8 +334,9 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 		for _, workload := range current {
 			if workload.ID == missingWorkload.ID &&
 				workload.ActualState == model.WorkloadFailed &&
-				workload.ContainerID != nil &&
-				*workload.ContainerID == missingContainerID {
+				workload.NodeID == nil &&
+				workload.ContainerID == nil &&
+				!workload.ResourceReserved {
 				originalFailed = true
 				continue
 			}
@@ -338,7 +346,10 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 				*workload.ContainerID == "" {
 				continue
 			}
-			container, inspectErr := dockerRuntime.Inspect(ctx, *workload.ContainerID)
+			if workload.NodeID == nil {
+				continue
+			}
+			container, inspectErr := dockerRuntime.Inspect(ctx, *workload.ContainerID, *workload.NodeID)
 			if inspectErr != nil {
 				if errors.Is(inspectErr, orchestratorRuntime.ErrContainerNotFound) {
 					continue
@@ -373,7 +384,10 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 		t.Fatalf("replacement workload = %+v; want a distinct running workload with a container ID",
 			replacementWorkload)
 	}
-	replacementContainer, err := dockerRuntime.Inspect(ctx, *replacementWorkload.ContainerID)
+	if replacementWorkload.NodeID == nil {
+		t.Fatal("replacement workload has no assigned node ID")
+	}
+	replacementContainer, err := dockerRuntime.Inspect(ctx, *replacementWorkload.ContainerID, *replacementWorkload.NodeID)
 	if err != nil {
 		t.Fatalf("inspect replacement Docker container %q: %v",
 			*replacementWorkload.ContainerID, err)
@@ -381,6 +395,12 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 	if replacementContainer.Status != "running" {
 		t.Fatalf("replacement Docker container %q status = %q; want running",
 			*replacementWorkload.ContainerID, replacementContainer.Status)
+	}
+	if replacementContainer.NodeID != *replacementWorkload.NodeID ||
+		replacementContainer.WorkloadID != replacementWorkload.ID {
+		t.Fatalf("replacement container ownership labels = node %q, workload %q; want node %q, workload %q",
+			replacementContainer.NodeID, replacementContainer.WorkloadID,
+			*replacementWorkload.NodeID, replacementWorkload.ID)
 	}
 	assertProcessAgentPlacement(t, ctx, env, workloads, agentIDs)
 	assertAllocationsMatchActiveWorkloads(t, ctx, env, serviceID)
@@ -405,7 +425,7 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 			workload.ContainerID == nil {
 			continue
 		}
-		if err := dockerRuntime.Remove(ctx, *workload.ContainerID); err != nil {
+		if err := dockerRuntime.Remove(ctx, *workload.ContainerID, failedNodeID); err != nil {
 			t.Fatalf("remove test-owned workload before simulated node loss: %v", err)
 		}
 	}
@@ -443,7 +463,7 @@ func TestRealAgentsProcessIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create service delete request: %v", err)
 	}
-	deleteRequest.Header.Set("Authorization", "Bearer "+env.token)
+	deleteRequest.Header.Set("Authorization", "Bearer "+env.operatorToken)
 	deleteResponse, err := client.Do(deleteRequest)
 	if err != nil {
 		t.Fatalf("delete service through control-plane process: %v", err)

@@ -8,37 +8,34 @@ import (
 	"mini-orchestrator/internal/model"
 )
 
-func (p *Postgres) CreateWorkload(
-	ctx context.Context,
-	workload model.Workload,
-) error {
+type workloadInserter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertWorkload(ctx context.Context, exec workloadInserter, workload model.Workload) error {
 	if workload.ExecutionState == "" {
 		workload.ExecutionState = model.ExecutionIdle
 	}
-	const query = `
-        INSERT INTO workloads (
-            id,
-            service_id,
-            node_id,
-            container_id,
-            image,
-            cpu_request_millis,
-            memory_request_mb,
-            deployment_version,
-            desired_state,
-            actual_state,
-            execution_state,
-            execution_error,
-            resource_reserved,
-            created_at,
-            updated_at
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-    `
-
-	_, err := p.db.ExecContext(
-		ctx,
-		query,
+	_, err := exec.ExecContext(ctx, `
+		INSERT INTO workloads (
+			id,
+			service_id,
+			node_id,
+			container_id,
+			image,
+			cpu_request_millis,
+			memory_request_mb,
+			deployment_version,
+			desired_state,
+			actual_state,
+			execution_state,
+			execution_error,
+			resource_reserved,
+			created_at,
+			updated_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+	`,
 		workload.ID,
 		workload.ServiceID,
 		workload.NodeID,
@@ -55,12 +52,70 @@ func (p *Postgres) CreateWorkload(
 		workload.CreatedAt,
 		workload.UpdatedAt,
 	)
+	return err
+}
+
+func (p *Postgres) CreateWorkload(
+	ctx context.Context,
+	workload model.Workload,
+) error {
+	err := insertWorkload(ctx, p.db, workload)
 
 	if err != nil {
 		return fmt.Errorf("create workload %q: %w", workload.ID, err)
 	}
 
 	return nil
+}
+
+func (p *Postgres) CreatePendingWorkloadIfBelowActiveLimit(
+	ctx context.Context,
+	workload model.Workload,
+	activeLimit int,
+) (bool, error) {
+	if activeLimit < 0 {
+		return false, fmt.Errorf("active workload limit cannot be negative")
+	}
+
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin bounded workload creation: %w", err)
+	}
+	defer tx.Rollback()
+
+	var serviceID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id
+		FROM services
+		WHERE id = $1
+		FOR UPDATE
+	`, workload.ServiceID).Scan(&serviceID); err != nil {
+		return false, fmt.Errorf("lock service %q for bounded workload creation: %w", workload.ServiceID, err)
+	}
+
+	var activeCount int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM workloads
+		WHERE service_id = $1
+		  AND desired_state <> $2
+		  AND actual_state IN ($3, $4, $5)
+	`, workload.ServiceID, model.WorkloadStopped,
+		model.WorkloadPending, model.WorkloadScheduled, model.WorkloadRunning,
+	).Scan(&activeCount); err != nil {
+		return false, fmt.Errorf("count active workloads for service %q: %w", workload.ServiceID, err)
+	}
+	if activeCount >= activeLimit {
+		return false, nil
+	}
+
+	if err := insertWorkload(ctx, tx, workload); err != nil {
+		return false, fmt.Errorf("create bounded workload %q: %w", workload.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit bounded workload creation: %w", err)
+	}
+	return true, nil
 }
 
 func (p *Postgres) GetWorkload(
@@ -173,6 +228,7 @@ func (p *Postgres) ListWorkloadsByService(
 			&workload.ActualState,
 			&workload.ExecutionState,
 			&workload.ExecutionError,
+			&workload.ResourceReserved,
 			&workload.CreatedAt,
 			&workload.UpdatedAt,
 		); err != nil {
